@@ -93,6 +93,16 @@ const Auth = {
    * Shortcut login instan untuk eksplorasi peran di preview
    */
   async quickDemoLogin(role) {
+   // Token demo/mock TIDAK valid di backend GAS. Kalau user sedang di Mode Live,
+    // paksa pindah ke Mode Demo dulu agar tidak langsung kena auto-logout
+    // "session expired" saat dashboard pertama kali load.
+    if (APP_CONFIG.DATA_MODE === 'api') {
+      APP_CONFIG.DATA_MODE = 'mock';
+      localStorage.setItem(APP_CONFIG.STORAGE_KEYS.DATA_MODE, 'mock');
+      if (typeof App !== 'undefined' && App.updateModeUI) App.updateModeUI();
+      UI.toast('Mode Live butuh akun spreadsheet — dialihkan ke Mode Demo', 'gold');
+    } 
+   
     const demoUsers = {
       ustaz: { userId: 'USR-USTAZ-01', role: 'ustaz', nama: 'Ustaz Ahmad Fauzi, Al-Hafizh', idTerkait: '' },
       santri: { userId: 'USR-SANTRI-01', role: 'santri', nama: 'Muhammad Hafizh Al-Fatih', idTerkait: '' },
