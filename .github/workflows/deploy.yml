@@ -1,40 +1,45 @@
-name: Deploy
+name: Deploy to GitHub Pages
+
+# Deploy aplikasi static (HTML + CSS + JS murni, tanpa build step)
+# Folder yang di-deploy: quran-retention-app/
+# URL live: https://iqbalrachman2905.github.io/aplikasi-monitoring-hafalan-ver2/
 
 on:
   push:
     branches:
       - main
-  pull_request:
-    branches:
-      - main
+  workflow_dispatch: # tombol "Run workflow" manual dari tab Actions
+
+# Izin minimal yang dibutuhkan untuk deploy ke Pages
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Hanya satu deploy Pages berjalan dalam satu waktu
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
 
 jobs:
   deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v3
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact (folder quran-retention-app)
+        uses: actions/upload-pages-artifact@v3
         with:
-          node-version: '18'
-
-      - name: Install dependencies
-        run: npm install
-
-      - name: Build
-        run: npm run build
-        continue-on-error: true
-
-      - name: Run tests
-        run: npm test
-        continue-on-error: true
+          path: quran-retention-app
 
       - name: Deploy to GitHub Pages
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-        uses: actions/upload-artifact@v4
-        with:
-          name: build
-          path: dist/
+        id: deployment
+        uses: actions/deploy-pages@v4
+
