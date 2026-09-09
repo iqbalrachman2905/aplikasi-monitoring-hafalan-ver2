@@ -1,0 +1,748 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Mutaba'ah Qur'an — Retention Engine</title>
+  <meta name="description" content="Aplikasi Monitoring & Retensi Hafalan Al-Qur'an Berbasis Spaced Repetition (PRD v4)">
+  
+  <!-- CSS Modules -->
+  <link rel="stylesheet" href="css/variables.css">
+  <link rel="stylesheet" href="css/base.css">
+  <link rel="stylesheet" href="css/layout.css">
+  <link rel="stylesheet" href="css/components.css">
+  <link rel="stylesheet" href="css/islamic-theme.css">
+  <link rel="stylesheet" href="css/animations.css">
+  
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📖</text></svg>">
+</head>
+<body>
+
+  <!-- GLOBAL APP CONTAINER -->
+  <div id="app-container">
+
+    <!-- TOP HEADER -->
+    <header class="app-header">
+      <div class="brand-wrapper">
+        <div class="brand-logo">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1-2.5-2.5Z"></path>
+            <path d="M6 6h10"></path>
+            <path d="M6 10h10"></path>
+            <path d="M6 14h6"></path>
+          </svg>
+        </div>
+        <div>
+          <h1 class="brand-title">Mutaba'ah Hafalan</h1>
+          <div class="brand-subtitle">Retention-First Engine</div>
+        </div>
+      </div>
+
+      <!-- Quick Switch & Profile in Header -->
+      <div class="header-actions">
+        <!-- Mode Switcher Badge -->
+        <button id="btn-toggle-mode" class="btn btn-outline btn-sm" style="font-size: 0.72rem; padding: 0.25rem 0.6rem; border-radius: var(--radius-full);" title="Klik untuk beralih mode Data">
+          <span id="mode-status-text">⚡ Mode Demo</span>
+        </button>
+
+        <div id="header-user-badge" class="user-badge hidden">
+          <span id="header-user-role" style="font-weight: 800; color: var(--emerald-800);">Santri</span>
+          <span style="color: var(--border-light)">|</span>
+          <span id="header-user-name" style="color: var(--text-main);">Hafizh</span>
+        </div>
+        <button id="btn-logout" class="btn btn-ghost btn-sm hidden" title="Keluar">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+            <polyline points="16 17 21 12 16 7"></polyline>
+            <line x1="21" y1="12" x2="9" y2="12"></line>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- MAIN CONTENT -->
+    <main class="main-content">
+
+      <!-- ===================================================================
+           VIEW 1: LOGIN VIEW
+           =================================================================== -->
+      <section id="view-login" class="view-enter" style="max-width: 440px; margin: 1.5rem auto;">
+        
+        <div class="card card-islamic-accent">
+          <div class="bismillah-text">بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ</div>
+          <div class="text-center" style="margin-bottom: 1.5rem;">
+            <h2 style="font-size: 1.35rem; color: var(--emerald-950); font-weight: 800;">Masuk ke Aplikasi</h2>
+            <p style="font-size: 0.85rem; margin-top: 0.25rem;">Monitoring Hafalan & Retensi Al-Qur'an Terpadu</p>
+          </div>
+
+          <form id="login-form">
+            <div class="form-group">
+              <label class="form-label" for="login-username">Username</label>
+              <input type="text" id="login-username" class="form-input" placeholder="Masukkan username" required autocomplete="username">
+            </div>
+
+            <div class="form-group">
+              <label class="form-label" for="login-password">Password</label>
+              <input type="password" id="login-password" class="form-input" placeholder="Masukkan password" required autocomplete="current-password">
+            </div>
+
+            <button type="submit" class="btn btn-primary btn-full btn-lg" style="margin-top: 0.5rem;">
+              <span>Masuk Aplikasi</span>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="5" y1="12" x2="19" y2="12"></line>
+                <polyline points="12 5 19 12 12 19"></polyline>
+              </svg>
+            </button>
+          </form>
+
+          <div class="islamic-divider">
+            <span>atau coba demo 1-klik</span>
+          </div>
+
+          <div class="flex-col gap-2">
+            <button type="button" class="btn btn-outline btn-full btn-sm" data-demo-role="santri">
+              <span>👦 Demo Role: <strong>Santri</strong> (Muhammad Hafizh)</span>
+            </button>
+            <button type="button" class="btn btn-outline btn-full btn-sm" data-demo-role="ortu">
+              <span>👨‍👩‍👦 Demo Role: <strong>Orang Tua</strong> (Bapak Ridwan)</span>
+            </button>
+            <button type="button" class="btn btn-outline btn-full btn-sm" data-demo-role="ustaz">
+              <span>👨‍🏫 Demo Role: <strong>Ustaz</strong> (Ustaz Ahmad Fauzi)</span>
+            </button>
+          </div>
+
+          <div style="margin-top: 1.5rem; padding: 0.75rem; background: var(--bg-card-subtle); border-radius: var(--radius-md); font-size: 0.75rem; color: var(--text-muted); text-align: center;">
+            <div style="font-weight: 700; color: var(--emerald-800); margin-bottom: 0.2rem;">📡 Status Backend Google Apps Script</div>
+            <div>Terkoneksi ke Web App Spreadsheet Database</div>
+          </div>
+        </div>
+
+      </section>
+
+      <!-- ===================================================================
+           VIEW 2: SANTRI DASHBOARD
+           =================================================================== -->
+      <section id="view-santri" class="hidden">
+        
+        <!-- Hero & Greeting -->
+        <div class="card-hero">
+          <div style="display: flex; justify-content: space-between; align-items: flex-start;">
+            <div>
+              <div id="santri-greeting" style="font-size: 0.9rem; opacity: 0.9; margin-bottom: 0.25rem;">Sobahul Khair</div>
+              <h2 style="font-size: 1.45rem; font-weight: 800; color: white;">Mari Jaga Hafalan Hari Ini</h2>
+            </div>
+            <div class="streak-badge">
+              <span class="streak-flame">🔥</span>
+              <span id="santri-streak-count">7 Hari</span>
+            </div>
+          </div>
+
+          <!-- XP & Level Bar -->
+          <div class="xp-progress-container" style="margin-top: 1.25rem;">
+            <div style="display: flex; justify-content: space-between; font-size: 0.8rem; font-weight: 700; margin-bottom: 0.35rem;">
+              <span id="santri-level-val">Level 4</span>
+              <span id="santri-xp-val">345 XP</span>
+            </div>
+            <div class="xp-progress-bar">
+              <div id="santri-xp-progress-fill" class="xp-progress-fill" style="width: 45%;"></div>
+            </div>
+            <div id="santri-next-xp-val" style="font-size: 0.7rem; opacity: 0.85; margin-top: 0.35rem; text-align: right;">
+              55 XP menuju Level 5
+            </div>
+          </div>
+        </div>
+
+        <!-- Tab Navigasi Santri -->
+        <div class="flex gap-2" style="margin-bottom: 1.25rem;">
+          <button id="tab-btn-missions" class="btn btn-primary btn-sm" onclick="App.switchSantriTab('missions')">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3L22 4"></path><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path></svg>
+            <span>Misi Harian</span>
+          </button>
+          <button id="tab-btn-flashcard" class="btn btn-outline btn-sm" onclick="App.switchSantriTab('flashcard')">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"></rect><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"></path></svg>
+            <span>Flashcard Tebak Ayat</span>
+          </button>
+        </div>
+
+        <!-- SECTION A: MISI HARIAN -->
+        <div id="santri-section-missions">
+          <div class="card-header-clean">
+            <h3 class="card-title">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--emerald-600)" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+              <span>Target Murojaah Hari Ini</span>
+            </h3>
+            <span style="font-size: 0.75rem; color: var(--gold-700); font-weight: 700;">Retention-Engine Active</span>
+          </div>
+
+          <div id="santri-missions-list">
+            <!-- Dynamic Mission Cards -->
+          </div>
+        </div>
+
+        <!-- SECTION B: FLASHCARD TEBAK AYAT -->
+        <div id="santri-section-flashcard" class="hidden">
+          <div class="card">
+            <div class="card-header-clean">
+              <div>
+                <h3 class="card-title" id="flashcard-surah-title">An-Naba' (Ayat 1)</h3>
+                <div style="font-size: 0.8rem; color: var(--text-muted);">Tebak sambungan ayat berikutnya:</div>
+              </div>
+              <button id="flashcard-audio-btn" class="btn btn-outline btn-sm" title="Dengar Dulu">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+                <span>Dengar Audio</span>
+              </button>
+            </div>
+
+            <!-- Ayah Card Question -->
+            <div class="ayah-card-container text-center" style="margin: 1rem 0;">
+              <div class="ayah-number-badge">Potongan Ayat</div>
+              <div id="flashcard-question-arabic" class="arabic-text-lg" style="margin: 0.75rem 0;">
+                عَمَّ يَتَسَآءَلُونَ
+              </div>
+              <div id="flashcard-question-trans" style="font-size: 0.85rem; color: var(--text-muted); font-style: italic;">
+                "Tentang apakah mereka saling bertanya-tanya?"
+              </div>
+            </div>
+
+            <div style="font-size: 0.85rem; font-weight: 700; margin-bottom: 0.5rem; color: var(--emerald-900);">
+              Pilih Sambungan Ayat yang Benar:
+            </div>
+
+            <div id="flashcard-options-container" class="flex-col gap-2">
+              <!-- Dynamic Options -->
+            </div>
+
+            <div style="margin-top: 1rem; display: flex; justify-content: flex-end;">
+              <button class="btn btn-ghost btn-sm" onclick="DashboardSantri.skipFlashcard()">
+                Lewati Ayat Ini ➔
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- SECTION C: KONSISTENSI & BADGES -->
+        <div class="grid-2" style="margin-top: 1.5rem;">
+          
+          <!-- Heatmap 30 Hari -->
+          <div class="card">
+            <h4 class="card-title" style="font-size: 0.95rem; margin-bottom: 0.5rem;">
+              <span>🗓️ Keaktifan 30 Hari</span>
+            </h4>
+            <div id="santri-heatmap-grid" class="heatmap-grid">
+              <!-- 30 Days Dynamic Cells -->
+            </div>
+            <div style="display: flex; justify-content: space-between; font-size: 0.7rem; color: var(--text-muted); margin-top: 0.5rem;">
+              <span>30 hari lalu</span>
+              <div style="display: flex; align-items: center; gap: 3px;">
+                <span>Jarang</span>
+                <span class="heatmap-cell level-1" style="width:8px; height:8px; display:inline-block;"></span>
+                <span class="heatmap-cell level-2" style="width:8px; height:8px; display:inline-block;"></span>
+                <span class="heatmap-cell level-3" style="width:8px; height:8px; display:inline-block;"></span>
+                <span>Rajin</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Badges Koleksi -->
+          <div class="card">
+            <h4 class="card-title" style="font-size: 0.95rem; margin-bottom: 0.5rem;">
+              <span>🏆 Koleksi Lencana (Badges)</span>
+            </h4>
+            <div id="santri-badges-list" class="badges-container">
+              <!-- Badges List -->
+            </div>
+          </div>
+
+        </div>
+
+        <!-- SECTION D: INBOX / NOTIFIKASI DARI USTAZ & ORTU -->
+        <div class="card" style="margin-top: 1rem;">
+          <h4 class="card-title" style="font-size: 0.95rem; margin-bottom: 0.75rem;">
+            <span>📬 Pesan & Feedback Terbaru</span>
+          </h4>
+          <div id="santri-notifs-list">
+            <!-- Notifications List -->
+          </div>
+        </div>
+
+      </section>
+
+      <!-- ===================================================================
+           VIEW 3: ORANG TUA DASHBOARD
+           =================================================================== -->
+      <section id="view-ortu" class="hidden">
+        
+        <!-- Header Ortu -->
+        <div class="card card-islamic-accent" style="margin-bottom: 1.25rem;">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div>
+              <div id="ortu-greeting" style="font-size: 0.85rem; color: var(--emerald-800); font-weight: 600;">Sobahul Khair</div>
+              <h2 id="ortu-santri-name-banner" style="font-size: 1.3rem; font-weight: 800; color: var(--emerald-950);">Memantau: Ananda</h2>
+            </div>
+            <div style="text-align: right;">
+              <div id="ortu-streak-val" style="font-weight: 800; color: var(--gold-700); font-size: 0.9rem;">7 Hari 🔥</div>
+              <div id="ortu-xp-val" style="font-size: 0.75rem; color: var(--text-muted);">345 XP (Lv 4)</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Rapor Visual Traffic Light Retensi -->
+        <div class="grid-4" style="margin-bottom: 1.25rem;">
+          <div class="stat-tile" style="border-top: 3px solid var(--status-green);">
+            <div id="ortu-stat-hijau" class="stat-val" style="color: var(--status-green);">0</div>
+            <div class="stat-label">🟢 Hijau (Aman)</div>
+          </div>
+          <div class="stat-tile" style="border-top: 3px solid var(--status-yellow);">
+            <div id="ortu-stat-kuning" class="stat-val" style="color: var(--status-yellow);">0</div>
+            <div class="stat-label">🟡 Kuning (Perhatian)</div>
+          </div>
+          <div class="stat-tile" style="border-top: 3px solid var(--status-red);">
+            <div id="ortu-stat-merah" class="stat-val" style="color: var(--status-red);">0</div>
+            <div class="stat-label">🔴 Merah (Kritis)</div>
+          </div>
+          <div class="stat-tile">
+            <div id="ortu-stat-total" class="stat-val" style="color: var(--emerald-800);">0</div>
+            <div class="stat-label">Total Unit</div>
+          </div>
+        </div>
+
+        <!-- Action Cards Ortu -->
+        <div class="grid-2" style="margin-bottom: 1.5rem;">
+          <!-- 1-Click Smart Random Test Button -->
+          <div class="card text-center" style="background: var(--grad-emerald); color: white; border: none; padding: 1.5rem;">
+            <div style="font-size: 2rem; margin-bottom: 0.5rem;">🎲</div>
+            <h3 style="font-size: 1.15rem; font-weight: 800; color: white;">Tes Hafalan Acak Pintar</h3>
+            <p style="font-size: 0.8rem; color: var(--emerald-100); margin: 0.5rem 0 1rem 0;">
+              Sistem memilih otomatis ayat yang perlu diuji tanpa Ayah/Bunda perlu mengetik surah. Dilengkapi audio murattal!
+            </p>
+            <button class="btn btn-gold btn-full btn-lg" onclick="DashboardOrtu.startRandomTest()">
+              <span>Mulai Uji Ananda (1-Klik)</span>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+            </button>
+          </div>
+
+          <!-- Kirim Semangat 1-Klik -->
+          <div class="card text-center" style="background: linear-gradient(135deg, #fffbeb 0%, #fef3c7 100%); border-color: var(--gold-300); padding: 1.5rem;">
+            <div style="font-size: 2rem; margin-bottom: 0.5rem;">💌</div>
+            <h3 style="font-size: 1.15rem; font-weight: 800; color: var(--gold-900);">Kirim Apresiasi & Doa</h3>
+            <p style="font-size: 0.8rem; color: var(--gold-800); margin: 0.5rem 0 1rem 0;">
+              Berikan motivasi instan yang akan langsung tampil di layar Ananda sebagai booster semangat murojaah.
+            </p>
+            <button class="btn btn-primary btn-full btn-lg" onclick="DashboardOrtu.openKirimSemangatModal()">
+              <span>Kirim Semangat ❤️</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Detail Unit Hafalan & Status Retensi -->
+        <div class="card" style="margin-bottom: 1.5rem;">
+          <div class="card-header-clean">
+            <h3 class="card-title">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--emerald-600)" stroke-width="2"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1-2.5-2.5Z"></path></svg>
+              <span>Status Kesehatan Seluruh Hafalan</span>
+            </h3>
+          </div>
+          <div id="ortu-hafalan-units-list">
+            <!-- Units list -->
+          </div>
+        </div>
+
+        <!-- Riwayat Tes -->
+        <div class="card">
+          <div class="card-header-clean">
+            <h3 class="card-title">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--emerald-600)" stroke-width="2"><path d="M12 8v4l3 3"></path><circle cx="12" cy="12" r="10"></circle></svg>
+              <span>Riwayat Tes Evaluasi Terakhir</span>
+            </h3>
+          </div>
+          <div id="ortu-recent-tests-list">
+            <!-- Recent Tests List -->
+          </div>
+        </div>
+
+      </section>
+
+      <!-- ===================================================================
+           VIEW 4: USTAZ DASHBOARD
+           =================================================================== -->
+      <section id="view-ustaz" class="hidden">
+        
+        <!-- Header Ustaz -->
+        <div class="card card-islamic-accent" style="margin-bottom: 1.25rem;">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div>
+              <div id="ustaz-greeting" style="font-size: 0.85rem; color: var(--emerald-800); font-weight: 600;">Sobahul Khair</div>
+              <h2 style="font-size: 1.3rem; font-weight: 800; color: var(--emerald-950);">Dashboard Monitoring Ustaz</h2>
+            </div>
+            <div class="flex gap-2">
+              <button class="btn btn-primary btn-sm" onclick="DashboardUstaz.openSetoranModal()">
+                <span>+ Setoran Baru</span>
+              </button>
+              <button class="btn btn-gold btn-sm" onclick="DashboardUstaz.openTargetModal()">
+                <span>🎯 Target</span>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Summary Kelompok -->
+        <div class="grid-4" style="margin-bottom: 1.25rem;">
+          <div class="stat-tile">
+            <div id="ustaz-stat-santri" class="stat-val">0</div>
+            <div class="stat-label">Santri Bimbingan</div>
+          </div>
+          <div class="stat-tile" style="border-top: 3px solid var(--status-green);">
+            <div id="ustaz-stat-hijau" class="stat-val" style="color: var(--status-green);">0</div>
+            <div class="stat-label">Hafalan Hijau</div>
+          </div>
+          <div class="stat-tile" style="border-top: 3px solid var(--status-yellow);">
+            <div id="ustaz-stat-kuning" class="stat-val" style="color: var(--status-yellow);">0</div>
+            <div class="stat-label">Hafalan Kuning</div>
+          </div>
+          <div class="stat-tile" style="border-top: 3px solid var(--status-red);">
+            <div id="ustaz-stat-merah" class="stat-val" style="color: var(--status-red);">0</div>
+            <div class="stat-label">Hafalan Merah</div>
+          </div>
+        </div>
+
+        <!-- Auto-Flag Warnings -->
+        <div style="margin-bottom: 1.25rem;">
+          <div style="font-size: 0.85rem; font-weight: 700; color: var(--text-main); margin-bottom: 0.5rem; display: flex; align-items: center; gap: 0.4rem;">
+            <span>🚨 Sistem Peringatan Otomatis (Auto-Flag Engine)</span>
+          </div>
+          <div id="ustaz-autoflag-container">
+            <!-- Auto-flag cards -->
+          </div>
+        </div>
+
+        <!-- Table / Matrix Santri -->
+        <div class="card">
+          <div class="card-header-clean">
+            <h3 class="card-title">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--emerald-600)" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>
+              <span>Matriks Retensi & Capaian Santri</span>
+            </h3>
+            <button class="btn btn-outline btn-sm" onclick="DashboardUstaz.openBroadcastModal()">
+              <span>📢 Broadcast Motivasi</span>
+            </button>
+          </div>
+
+          <div style="overflow-x: auto;">
+            <table style="width: 100%; border-collapse: collapse; text-align: left; font-size: 0.875rem;">
+              <thead>
+                <tr style="border-bottom: 2px solid var(--border-light); color: var(--text-muted); font-size: 0.75rem; text-transform: uppercase;">
+                  <th style="padding: 0.75rem;">Nama & Target</th>
+                  <th style="padding: 0.75rem;">Status Retensi</th>
+                  <th style="padding: 0.75rem;">Streak & XP</th>
+                  <th style="padding: 0.75rem; text-align: right;">Aksi</th>
+                </tr>
+              </thead>
+              <tbody id="ustaz-santri-table-body">
+                <!-- Dynamic Santri Rows -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+      </section>
+
+    </main>
+
+    <!-- ===================================================================
+         MODALS COLLECTION
+         =================================================================== -->
+
+    <!-- 1. MODAL KONFIRMASI MUROJAAH (SANTRI) -->
+    <div id="modal-murojaah-confirm" class="modal-backdrop">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3 class="modal-title">Konfirmasi Selesai Murojaah</h3>
+          <button class="btn btn-ghost btn-sm" data-close-modal>✕</button>
+        </div>
+        <input type="hidden" id="murojaah-id-master">
+        <input type="hidden" id="murojaah-jenis-misi">
+
+        <div class="text-center" style="margin-bottom: 1.25rem;">
+          <div id="murojaah-surah-val" style="font-size: 1.25rem; font-weight: 800; color: var(--emerald-950);">Surah</div>
+          <div id="murojaah-ayat-val" style="font-size: 0.9rem; color: var(--text-muted);">Ayat</div>
+          <p style="font-size: 0.85rem; margin-top: 0.75rem;">Bagaimana kelancaran murojaahmu barusan?</p>
+        </div>
+
+        <div class="flex-col gap-2">
+          <button class="btn btn-primary btn-full btn-lg" onclick="DashboardSantri.submitMurojaahConfirmation('Lancar')">
+            <span>🟢 Lancar Tanpa Bantuan (+XP Bonus)</span>
+          </button>
+          <button class="btn btn-outline btn-full" onclick="DashboardSantri.submitMurojaahConfirmation('Tersendat')">
+            <span>🟡 Masih Ada yang Tersendat</span>
+          </button>
+          <button class="btn btn-ghost btn-full" style="color: var(--status-red);" onclick="DashboardSantri.submitMurojaahConfirmation('Lupa')">
+            <span>🔴 Banyak yang Lupa (Perlu Ulang)</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 2. MODAL SMART RANDOM TEST (ORANG TUA) -->
+    <div id="modal-random-test" class="modal-backdrop">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3 class="modal-title">
+            <span>🎲 Tes Acak Retensi</span>
+          </h3>
+          <button class="btn btn-ghost btn-sm" data-close-modal onclick="UI.stopAudio()">✕</button>
+        </div>
+
+        <div class="text-center" style="margin-bottom: 1rem;">
+          <h2 id="random-test-surah" style="font-size: 1.35rem; font-weight: 800; color: var(--emerald-950); margin-bottom: 0.25rem;">Surah An-Naba'</h2>
+          <div style="display: flex; justify-content: center; gap: 0.5rem;">
+            <span id="random-test-ayat-badge" class="status-pill status-green">Ayat 1</span>
+            <span id="random-test-status-pill" class="status-pill status-yellow">Status: Kuning</span>
+          </div>
+        </div>
+
+        <!-- Preview Ayat Arab & Audio -->
+        <div class="ayah-card-container text-center" style="margin-bottom: 1.25rem;">
+          <div id="random-test-arabic" class="arabic-text-lg">
+            عَمَّ يَتَسَآءَلُونَ
+          </div>
+          <div id="random-test-trans" style="font-size: 0.85rem; color: var(--text-muted); margin-top: 0.5rem; font-style: italic;">
+            "Tentang apakah mereka saling bertanya-tanya?"
+          </div>
+
+          <!-- Audio Waveform Player -->
+          <div class="audio-player-box" style="justify-content: center; margin-top: 1rem;">
+            <button id="random-test-audio-btn" class="audio-play-btn" title="Dengarkan Murattal">
+              <span class="audio-play-icon">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+              </span>
+            </button>
+            <div>
+              <div style="font-size: 0.8rem; font-weight: 700; color: var(--emerald-900);">Audio Bantuan Ortu</div>
+              <div class="waveform-anim">
+                <div class="waveform-bar"></div>
+                <div class="waveform-bar"></div>
+                <div class="waveform-bar"></div>
+                <div class="waveform-bar"></div>
+                <div class="waveform-bar"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div style="font-size: 0.85rem; font-weight: 700; color: var(--text-main); margin-bottom: 0.5rem; text-align: center;">
+          Bagaimana bacaan Ananda?
+        </div>
+
+        <!-- 1-Click Evaluation Buttons -->
+        <div class="flex-col gap-2">
+          <button class="btn btn-primary btn-full btn-lg" onclick="DashboardOrtu.submitTestEvaluation('Lancar')">
+            <span>🟢 Lancar & Sempurna (+5 XP Bonus)</span>
+          </button>
+          <button class="btn btn-outline btn-full" onclick="DashboardOrtu.submitTestEvaluation('Tersendat')">
+            <span>🟡 Ada 1-2 Kesalahan / Tersendat</span>
+          </button>
+          <button class="btn btn-danger btn-full" onclick="DashboardOrtu.submitTestEvaluation('Lupa')">
+            <span>🔴 Lupa / Tidak Ingat (Masuk Recovery)</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 3. MODAL KIRIM SEMANGAT (ORANG TUA) -->
+    <div id="modal-kirim-semangat" class="modal-backdrop">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3 class="modal-title">💌 Kirim Semangat ke Ananda</h3>
+          <button class="btn btn-ghost btn-sm" data-close-modal>✕</button>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Pilih Pesan Cepat atau Tulis Sendiri:</label>
+          <div class="flex-col gap-2" style="margin-bottom: 1rem;">
+            <button type="button" class="btn btn-outline btn-sm text-left" onclick="DashboardOrtu.setPredefinedPesan('MasyaAllah Ananda, Ayah dan Bunda sangat bangga dengan hafalanmu hari ini! ❤️')">
+              "MasyaAllah Ananda, Ayah dan Bunda sangat bangga! ❤️"
+            </button>
+            <button type="button" class="btn btn-outline btn-sm text-left" onclick="DashboardOrtu.setPredefinedPesan('Tetap istiqomah ya nak, menghafal Al-Quran adalah mahkota kemuliaan di akhirat kelak. 👑')">
+              "Tetap istiqomah ya nak, mahkota kemuliaan menantimu 👑"
+            </button>
+            <button type="button" class="btn btn-outline btn-sm text-left" onclick="DashboardOrtu.setPredefinedPesan('Jangan putus asa ya, pelan-pelan yang penting istiqomah setiap hari! 🌟')">
+              "Jangan putus asa, pelan-pelan tapi istiqomah! 🌟"
+            </button>
+          </div>
+
+          <textarea id="input-pesan-semangat" class="form-textarea" rows="3" placeholder="Tulis pesan semangat dari hati..."></textarea>
+        </div>
+
+        <button class="btn btn-gold btn-full btn-lg" onclick="DashboardOrtu.sendSemangat()">
+          <span>Kirimkan Sekarang</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- 4. MODAL INPUT SETORAN BARU (USTAZ) -->
+    <div id="modal-input-setoran" class="modal-backdrop">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3 class="modal-title">📝 Input Setoran Hafalan Baru</h3>
+          <button class="btn btn-ghost btn-sm" data-close-modal>✕</button>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="input-setoran-santri">Nama Santri</label>
+          <select id="input-setoran-santri" class="form-select"></select>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="input-setoran-surah">Surah</label>
+          <select id="input-setoran-surah" class="form-select"></select>
+        </div>
+
+        <div class="grid-2">
+          <div class="form-group">
+            <label class="form-label" for="input-setoran-mulai">Ayat Mulai</label>
+            <input type="number" id="input-setoran-mulai" class="form-input" min="1" value="1">
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="input-setoran-akhir">Ayat Akhir</label>
+            <input type="number" id="input-setoran-akhir" class="form-input" min="1" value="20">
+          </div>
+        </div>
+
+        <div class="grid-2">
+          <div class="form-group">
+            <label class="form-label" for="input-setoran-nilai">Nilai</label>
+            <select id="input-setoran-nilai" class="form-select">
+              <option value="A">A (Mumtaz / Sangat Lancar)</option>
+              <option value="B+">B+ (Jayyid Jiddan / Baik Sekali)</option>
+              <option value="B">B (Jayyid / Cukup)</option>
+              <option value="C">C (Perlu Diulang)</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="input-setoran-catatan">Catatan Tajwid</label>
+            <input type="text" id="input-setoran-catatan" class="form-input" placeholder="Misal: Makhraj huruf kaf">
+          </div>
+        </div>
+
+        <button class="btn btn-primary btn-full btn-lg" onclick="DashboardUstaz.submitSetoran()">
+          <span>Simpan & Masukkan ke Retention Engine</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- 5. MODAL ATUR TARGET (USTAZ) -->
+    <div id="modal-atur-target" class="modal-backdrop">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3 class="modal-title">🎯 Atur Target Bulanan</h3>
+          <button class="btn btn-ghost btn-sm" data-close-modal>✕</button>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="input-target-santri">Santri</label>
+          <select id="input-target-santri" class="form-select"></select>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="input-target-surah">Target Surah</label>
+          <select id="input-target-surah" class="form-select"></select>
+        </div>
+
+        <div class="grid-2">
+          <div class="form-group">
+            <label class="form-label" for="input-target-mulai">Ayat Mulai</label>
+            <input type="number" id="input-target-mulai" class="form-input" min="1" value="1">
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="input-target-akhir">Ayat Akhir</label>
+            <input type="number" id="input-target-akhir" class="form-input" min="1" value="40">
+          </div>
+        </div>
+
+        <button class="btn btn-gold btn-full btn-lg" onclick="DashboardUstaz.submitTarget()">
+          <span>Simpan Target Bulanan</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- 6. MODAL FEEDBACK USTAZ -->
+    <div id="modal-kirim-feedback" class="modal-backdrop">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3 class="modal-title">📖 Feedback untuk <span id="feedback-santri-name">Santri</span></h3>
+          <button class="btn btn-ghost btn-sm" data-close-modal>✕</button>
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="input-feedback-pesan">Pesan Arahan & Perbaikan:</label>
+          <textarea id="input-feedback-pesan" class="form-textarea" rows="4" placeholder="Misal: Perhatikan panjang harakat mad thabi'i pada ayat 10-15..."></textarea>
+        </div>
+        <button class="btn btn-primary btn-full btn-lg" onclick="DashboardUstaz.submitFeedback()">
+          <span>Kirim Arahan</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- 7. MODAL BROADCAST MOTIVASI USTAZ -->
+    <div id="modal-broadcast" class="modal-backdrop">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3 class="modal-title">📢 Broadcast Pesan ke Semua Santri</h3>
+          <button class="btn btn-ghost btn-sm" data-close-modal>✕</button>
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="input-broadcast-pesan">Pesan Motivasi / Pengumuman:</label>
+          <textarea id="input-broadcast-pesan" class="form-textarea" rows="4" placeholder="Semangat menjaga hafalan sebelum ujian akhir pekan ya anak-anakku!"></textarea>
+        </div>
+        <button class="btn btn-gold btn-full btn-lg" onclick="DashboardUstaz.submitBroadcast()">
+          <span>Kirim Broadcast</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- BOTTOM NAVIGATION (MOBILE) -->
+    <nav class="bottom-nav hidden">
+      <button class="nav-item active" onclick="App.routeUserToDashboard()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path><polyline points="9 22 9 12 15 12 15 22"></polyline></svg>
+        <span>Beranda</span>
+      </button>
+      <button class="nav-item" data-switch-role="santri">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1-2.5-2.5Z"></path></svg>
+        <span>Santri</span>
+      </button>
+      <button class="nav-item" data-switch-role="ortu">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"></path></svg>
+        <span>Ortu</span>
+      </button>
+      <button class="nav-item" data-switch-role="ustaz">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle></svg>
+        <span>Ustaz</span>
+      </button>
+    </nav>
+
+    <!-- TOAST NOTIFICATION CONTAINER -->
+    <div id="toast-container"></div>
+
+    <!-- GLOBAL LOADING SPINNER OVERLAY -->
+    <div id="global-loader" class="modal-backdrop hidden" style="z-index: 200;">
+      <div style="background: white; padding: 1.5rem 2rem; border-radius: var(--radius-xl); display: flex; align-items: center; gap: 1rem; box-shadow: var(--shadow-xl);">
+        <div class="spinner spinner-emerald"></div>
+        <div class="loader-text" style="font-weight: 700; color: var(--emerald-900);">Memproses data...</div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- JavaScript Modules -->
+  <script src="js/config.js"></script>
+  <script src="js/quran-data.js"></script>
+  <script src="js/mock-data.js"></script>
+  <script src="js/api.js"></script>
+  <script src="js/auth.js"></script>
+  <script src="js/ui.js"></script>
+  <script src="js/dashboard-santri.js"></script>
+  <script src="js/dashboard-ortu.js"></script>
+  <script src="js/dashboard-ustaz.js"></script>
+  <script src="js/app.js"></script>
+
+</body>
+</html>

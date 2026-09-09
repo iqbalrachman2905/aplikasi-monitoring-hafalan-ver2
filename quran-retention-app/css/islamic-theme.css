@@ -1,0 +1,127 @@
+/* ==========================================================================
+   ISLAMIC THEME & DECORATIVE MOTIFS
+   ========================================================================== */
+
+/* Islamic Arched Frame / Mihrab Header */
+.islamic-arch-header {
+  background: var(--grad-emerald);
+  border-radius: var(--radius-xl);
+  padding: 1.5rem;
+  color: white;
+  position: relative;
+  overflow: hidden;
+  border: 1px solid rgba(245, 158, 11, 0.3);
+}
+
+.islamic-arch-header::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 140px;
+  height: 45px;
+  background: radial-gradient(ellipse at top, rgba(245, 158, 11, 0.25) 0%, transparent 70%);
+  pointer-events: none;
+}
+
+/* Islamic Geometric Background Motif */
+.islamic-pattern-bg {
+  background-color: var(--emerald-900);
+  background-image: 
+    radial-gradient(circle at 50% 50%, rgba(245, 158, 11, 0.1) 1px, transparent 1px),
+    linear-gradient(45deg, rgba(255,255,255,0.03) 25%, transparent 25%, transparent 75%, rgba(255,255,255,0.03) 75%, rgba(255,255,255,0.03)),
+    linear-gradient(45deg, rgba(255,255,255,0.03) 25%, transparent 25%, transparent 75%, rgba(255,255,255,0.03) 75%, rgba(255,255,255,0.03));
+  background-size: 20px 20px, 40px 40px, 40px 40px;
+  background-position: 0 0, 0 0, 20px 20px;
+}
+
+/* Bismillah Banner */
+.bismillah-text {
+  font-family: var(--font-family-arabic);
+  font-size: 1.5rem;
+  color: var(--gold-400);
+  text-align: center;
+  margin-bottom: 0.5rem;
+  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+
+/* Gold Ornament Divider */
+.islamic-divider {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  margin: 1.25rem 0;
+  color: var(--gold-500);
+}
+
+.islamic-divider::before,
+.islamic-divider::after {
+  content: '';
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--gold-400), transparent);
+  flex: 1;
+}
+
+/* Ayah Card Decoration */
+.ayah-card-container {
+  background: #ffffff;
+  border: 1.5px solid var(--emerald-200);
+  border-radius: var(--radius-xl);
+  padding: 1.75rem 1.25rem;
+  position: relative;
+  box-shadow: 0 8px 24px rgba(6, 78, 59, 0.08);
+}
+
+.ayah-number-badge {
+  position: absolute;
+  top: -12px;
+  right: 20px;
+  background: var(--grad-gold);
+  color: white;
+  font-weight: 700;
+  font-size: 0.75rem;
+  padding: 0.2rem 0.65rem;
+  border-radius: var(--radius-full);
+  box-shadow: 0 2px 6px rgba(217, 119, 6, 0.3);
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+/* Islamic Badge Card */
+.card-islamic-accent {
+  border-top: 4px solid var(--emerald-600);
+  border-bottom: 1px solid var(--emerald-100);
+}
+
+.card-gold-accent {
+  border-top: 4px solid var(--gold-500);
+}
+
+/* Glowing Lantern / Crescent Icon Wrapper */
+.islamic-glow-icon {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: var(--gold-100);
+  color: var(--gold-700);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 0 12px rgba(245, 158, 11, 0.3);
+}
+
+/* Traffic Light Summary Ring / Bar */
+.traffic-summary-pill {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: white;
+  padding: 0.4rem 0.8rem;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--border-light);
+  font-size: 0.8rem;
+  font-weight: 700;
+}

@@ -1,0 +1,131 @@
+/* ==========================================================================
+   BASE & RESET STYLES
+   ========================================================================== */
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  font-size: 16px;
+  -webkit-tap-highlight-color: transparent;
+  scroll-behavior: smooth;
+}
+
+body {
+  font-family: var(--font-family-sans);
+  background-color: var(--bg-main);
+  color: var(--text-main);
+  line-height: 1.5;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow-x: hidden;
+  background-image: radial-gradient(#d1fae5 0.75px, transparent 0.75px), radial-gradient(#fef3c7 0.75px, var(--bg-main) 0.75px);
+  background-size: 30px 30px;
+  background-position: 0 0, 15px 15px;
+}
+
+/* Arabic Text Typography */
+.arabic-text {
+  font-family: var(--font-family-arabic);
+  direction: rtl;
+  font-size: 1.75rem;
+  line-height: 2.2;
+  color: var(--emerald-900);
+  text-align: right;
+  word-spacing: 2px;
+  letter-spacing: 0;
+}
+
+.arabic-text-lg {
+  font-family: var(--font-family-arabic);
+  direction: rtl;
+  font-size: 2.25rem;
+  line-height: 2.4;
+  color: var(--emerald-900);
+  text-align: center;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  color: var(--text-main);
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+p {
+  color: var(--text-muted);
+}
+
+a {
+  color: var(--emerald-600);
+  text-decoration: none;
+  transition: color var(--transition-fast);
+}
+
+a:hover {
+  color: var(--emerald-700);
+}
+
+button, input, select, textarea {
+  font-family: inherit;
+  font-size: inherit;
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg-main);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--emerald-300);
+  border-radius: var(--radius-full);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--emerald-500);
+}
+
+/* Utility Helpers */
+.hidden {
+  display: none !important;
+}
+
+.text-center {
+  text-align: center;
+}
+
+.text-right {
+  text-align: right;
+}
+
+.font-bold {
+  font-weight: 700;
+}
+
+.font-semibold {
+  font-weight: 600;
+}
+
+.text-emerald {
+  color: var(--emerald-600);
+}
+
+.text-gold {
+  color: var(--gold-600);
+}
+
+.text-red {
+  color: var(--status-red);
+}
+
+.text-muted {
+  color: var(--text-muted);
+}
