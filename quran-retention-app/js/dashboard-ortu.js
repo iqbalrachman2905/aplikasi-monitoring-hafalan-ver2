@@ -127,7 +127,7 @@ const DashboardOrtu = {
 
       if (res.success && res.test) {
         this.currentRandomTest = res.test;
-        this.openRandomTestModal(res.test);
+        await this.openRandomTestModal(res.test);
       } else {
         UI.toast(res.message || 'Tidak ada kandidat hafalan untuk diuji', 'error');
       }
@@ -137,7 +137,7 @@ const DashboardOrtu = {
     }
   },
 
-  openRandomTestModal(test) {
+  async openRandomTestModal(test) {
     const modal = document.getElementById('modal-random-test');
     if (!modal) return;
 
@@ -152,14 +152,20 @@ const DashboardOrtu = {
       statusEl.textContent = `Status: ${test.retentionStatus}`;
     }
 
-    // Ambil Teks Arab & Audio dari Database / Quran Data
-    const ayahInfo = QURAN_DATA.getAyah(test.surah, test.targetAyat);
+    // Tampilkan modal dulu dengan status memuat, lalu isi teks & audio ayat asli:
+    // Mode Live -> backend (Cache_Ayat -> equran.id), Mode Demo -> bank sampel lokal.
     
     const arabicEl = document.getElementById('random-test-arabic');
-    if (arabicEl) arabicEl.textContent = ayahInfo.arabic || 'بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ';
-
+    
     const transEl = document.getElementById('random-test-trans');
-    if (transEl) transEl.textContent = ayahInfo.translation ? `"${ayahInfo.translation}"` : '';
+   if (arabicEl) arabicEl.textContent = '⏳ Memuat teks ayat...';
+    if (transEl) transEl.textContent = '';
+    UI.openModal('modal-random-test');
+
+    const meta = QURAN_DATA.getSurahByName(test.surah);
+    const ayahInfo = await QURAN_DATA.getAyahLive(meta ? meta.number : 78, test.targetAyat);
+
+     if (arabicEl) arabicEl.textContent = ayahInfo.arabic || 'بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ';
 
     // Bind Audio Play Button
     const playBtn = document.getElementById('random-test-audio-btn');
@@ -167,8 +173,7 @@ const DashboardOrtu = {
       playBtn.onclick = () => UI.playAyahAudio(ayahInfo.audio, `${test.surah} Ayat ${test.targetAyat}`);
     }
 
-    UI.openModal('modal-random-test');
-  },
+      },
 
   async submitTestEvaluation(kualitas) {
     if (!this.currentRandomTest) return;
