@@ -256,56 +256,134 @@ const DashboardSantri = {
   },
 
   // --- FLASHCARD ENGINE ---
-  initFlashcards() {
-    this.flashcardPool = [
-      {
-        surah: "An-Naba'",
-        targetAyah: 1,
-        questionArabic: "عَمَّ يَتَسَآءَلُونَ",
-        questionTranslation: "Tentang apakah mereka saling bertanya-tanya?",
-        nextAyahArabic: "عَنِ ٱلنَّبَإِ ٱلْعَظِيمِ",
-        nextAyahTranslation: "Tentang berita yang besar (hari berbangkit)",
-        audioUrl: "https://equran.nos.wjv-1.neo.id/audio-partial/Misyari-Rasyid-Al-Afasi/078001.mp3",
-        options: [
-          "عَنِ ٱلنَّبَإِ ٱلْعَظِيمِ",
-          "ٱلَّذِى هُمْ فِيهِ مُخْتَلِفُونَ",
-          "كَلَّا سَيَعْلَمُونَ"
-        ]
-      },
-      {
-        surah: "An-Nazi'at",
-        targetAyah: 1,
-        questionArabic: "وَٱلنَّٰزِعَٰتِ غَرْقًا",
-        questionTranslation: "Demi (malaikat) yang mencabut (nyawa) dengan keras,",
-        nextAyahArabic: "وَٱلنَّٰشِطَٰتِ نَشْطًا",
-        nextAyahTranslation: "demi (malaikat) yang mencabut (nyawa) dengan lemah lembut,",
-        audioUrl: "https://equran.nos.wjv-1.neo.id/audio-partial/Misyari-Rasyid-Al-Afasi/079001.mp3",
-        options: [
-          "وَٱلنَّٰشِطَٰتِ نَشْطًا",
-          "وَٱلسَّٰبِحَٰتِ سَبْحًا",
-          "فَٱلسَّٰبِقَٰتِ سَبْقًا"
-        ]
-      },
-      {
-        surah: "Al-Ikhlas",
-        targetAyah: 1,
-        questionArabic: "قُلْ هُوَ ٱللَّهُ أَحَدٌ",
-        questionTranslation: "Katakanlah (Muhammad), 'Dialah Allah, Yang Maha Esa.'",
-        nextAyahArabic: "ٱللَّهُ ٱلصَّمَدُ",
-        nextAyahTranslation: "Allah tempat meminta segala sesuatu.",
-        audioUrl: "https://equran.nos.wjv-1.neo.id/audio-partial/Misyari-Rasyid-Al-Afasi/112001.mp3",
-        options: [
-          "ٱللَّهُ ٱلصَّمَدُ",
-          "لَمْ يَلِدْ وَلَمْ يُولَدْ",
-          "وَلَمْ يَكُن لَّهُۥ كُفُوًا أَحَدٌۢ"
-        ]
+  // Kartu contoh statis: dipakai di Mode Demo atau bila santri belum punya misi.
+  fallbackFlashcards: [
+    {
+      idMaster: null,
+      surah: "An-Naba'",
+      targetAyah: 1,
+      questionArabic: "عَمَّ يَتَسَآءَلُونَ",
+      questionTranslation: "Tentang apakah mereka saling bertanya-tanya?",
+      nextAyahArabic: "عَنِ ٱلنَّبَإِ ٱلْعَظِيمِ",
+      nextAyahTranslation: "Tentang berita yang besar (hari berbangkit)",
+      audioUrl: "https://cdn.equran.id/audio-partial/Misyari-Rasyid-Al-Afasi/078001.mp3",
+      options: [
+        "عَنِ ٱلنَّبَإِ ٱلْعَظِيمِ",
+        "ٱلَّذِى هُمْ فِيهِ مُخْتَلِفُونَ",
+        "كَلَّا سَيَعْلَمُونَ"
+      ]
+    },
+    {
+      idMaster: null,
+      surah: "An-Nazi'at",
+      targetAyah: 1,
+      questionArabic: "وَٱلنَّٰزِعَٰتِ غَرْقًا",
+      questionTranslation: "Demi (malaikat) yang mencabut (nyawa) dengan keras,",
+      nextAyahArabic: "وَٱلنَّٰشِطَٰتِ نَشْطًا",
+      nextAyahTranslation: "demi (malaikat) yang mencabut (nyawa) dengan lemah lembut,",
+      audioUrl: "https://cdn.equran.id/audio-partial/Misyari-Rasyid-Al-Afasi/079001.mp3",
+      options: [
+        "وَٱلنَّٰشِطَٰتِ نَشْطًا",
+        "وَٱلسَّٰبِحَٰتِ سَبْحًا",
+        "فَٱلسَّٰبِقَٰتِ سَبْقًا"
+      ]
+    },
+    {
+      idMaster: null,
+      surah: "Al-Ikhlas",
+      targetAyah: 1,
+      questionArabic: "قُلْ هُوَ ٱللَّهُ أَحَدٌ",
+      questionTranslation: "Katakanlah (Muhammad), 'Dialah Allah, Yang Maha Esa.'",
+      nextAyahArabic: "ٱللَّهُ ٱلصَّمَدُ",
+      nextAyahTranslation: "Allah tempat meminta segala sesuatu.",
+      audioUrl: "https://cdn.equran.id/audio-partial/Misyari-Rasyid-Al-Afasi/112001.mp3",
+      options: [
+        "ٱللَّهُ ٱلصَّمَدُ",
+        "لَمْ يَلِدْ وَلَمْ يُولَدْ",
+        "وَلَمْ يَكُن لَّهُۥ كُفُوًا أَحَدٌۢ"
+      ]
+    }
+  ],
+
+  async initFlashcards() {
+    // Mode Demo -> kartu contoh statis agar stabil & instan.
+    if (typeof APP_CONFIG === 'undefined' || APP_CONFIG.DATA_MODE !== 'api') {
+      this.flashcardPool = this.fallbackFlashcards;
+      this.currentFlashcardIndex = 0;
+      this.renderCurrentFlashcard();
+      return;
+    }
+
+    // Mode Live -> susun kartu dari surah yang sedang dimurojaah (misi aktif).
+    const missions = (this.data && this.data.missions) || {};
+    const units = [];
+    if (missions.sabaq) units.push(missions.sabaq);
+    (missions.sabqi || []).forEach(u => units.push(u));
+    (missions.manzil || []).forEach(u => units.push(u));
+
+    if (units.length === 0) {
+      this.flashcardPool = this.fallbackFlashcards;
+      this.currentFlashcardIndex = 0;
+      this.renderCurrentFlashcard();
+      return;
+    }
+
+    // Acak unit misi, ambil maks 5 kartu per sesi latihan.
+    const picked = units.sort(() => Math.random() - 0.5).slice(0, 5);
+    const pool = [];
+    for (const u of picked) {
+      try {
+        const card = await this.buildFlashcardFromUnit(u);
+        if (card) pool.push(card);
+      } catch (e) {
+        console.warn('[Flashcard] gagal menyusun kartu:', e.message);
+      }
       }
     ];
-
+    this.flashcardPool = pool.length > 0 ? pool : this.fallbackFlashcards;
     this.currentFlashcardIndex = 0;
     this.renderCurrentFlashcard();
   },
 
+  // Susun 1 kartu "tebak kelanjutan ayat" dari 1 unit murojaah:
+  // pilih 1 ayat acak di dalam rentang hafalan sebagai soal,
+  // ayat tepat setelahnya sebagai jawaban, plus 2 pengecoh.
+  async buildFlashcardFromUnit(unit) {
+    const meta = QURAN_DATA.getSurahByName(unit.surah);
+    const surahNum = meta ? meta.number : 78;
+    const surahName = meta ? meta.name : unit.surah;
+    const mulai = Math.max(1, Number(unit.ayatMulai) || 1);
+    const akhir = Math.max(mulai, Number(unit.ayatAkhir) || mulai);
+    const maxTarget = Math.max(mulai, akhir - 1);
+    const target = mulai + Math.floor(Math.random() * (maxTarget - mulai + 1));
+
+    const [q, next, d1] = await Promise.all([
+      QURAN_DATA.getAyahLive(surahNum, target),
+      QURAN_DATA.getAyahLive(surahNum, target + 1),
+      QURAN_DATA.getAyahLive(surahNum, Math.min(target + 2, akhir + 1))
+    ]);
+    // Pengecoh kedua: ayat acak lain dalam rentang hafalan.
+    let otherNum = mulai + Math.floor(Math.random() * (akhir - mulai + 1));
+    if (otherNum === target + 1) otherNum = target;
+    const d2 = await QURAN_DATA.getAyahLive(surahNum, otherNum);
+
+    const options = [next.arabic, d1.arabic, d2.arabic].filter((v, i, a) => v && a.indexOf(v) === i);
+    if (options.length < 2) return null; // teks kembar -> lewati unit ini
+    while (options.length < 3) options.push(d1.arabic);
+
+    return {
+      idMaster: unit.idMaster || null,
+      surah: surahName,
+      targetAyah: target,
+      questionArabic: q.arabic,
+      questionTranslation: q.translation || '',
+      nextAyahArabic: next.arabic,
+      nextAyahTranslation: next.translation || '',
+      audioUrl: q.audio || next.audio || '',
+      options: options.sort(() => Math.random() - 0.5)
+    };
+  },
+  
   renderCurrentFlashcard() {
     const card = this.flashcardPool[this.currentFlashcardIndex];
     if (!card) return;
@@ -317,7 +395,7 @@ const DashboardSantri = {
     if (qArabicEl) qArabicEl.textContent = card.questionArabic;
 
     const qTransEl = document.getElementById('flashcard-question-trans');
-    if (qTransEl) qTransEl.textContent = `"${card.questionTranslation}"`;
+    if (qTransEl) qTransEl.textContent = card.questionTranslation ? `"${card.questionTranslation}"` : '';
 
     // Reset flipped state
     const flashcardEl = document.getElementById('interactive-flashcard');
