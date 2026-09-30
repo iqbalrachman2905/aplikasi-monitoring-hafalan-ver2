@@ -16,19 +16,23 @@ Panduan ini memandu Anda langkah demi langkah untuk mengonfigurasi Google Spread
 2. Salin dan tempel seluruh isi file `backend/Code.gs` ke dalam editor tersebut.
 3. Pastikan konstanta di baris atas:
    ```javascript
-   const SPREADSHEET_ID = '16Bg7EG0NXQZkELkzB1mb8RorIv8ruLVgi6ZiGEDLMLU';
-   const APP_TIMEZONE = 'Asia/Jakarta';        // zona waktu "hari ini" & jadwal review
-   const SETUP_SECRET = 'GANTI-KUNCI-SETUP-ANDA'; // kunci anti-penyalahgunaan setup
+   const APP_VERSION = '4.3.0';                 // WAJIB sama dengan js/config.js
+   const APP_TIMEZONE = 'Asia/Jakarta';         // zona waktu "hari ini" & jadwal review
+   const SPREADSHEET_ID_DEFAULT = '16Bg7...';   // hanya dipakai bila Script Property kosong
    ```
-   sudah sesuai dengan ID Spreadsheet & zona waktu kelompok Anda.
 4. Klik ikon **Save (Simpan / Ctrl+S)**.
 
-> ⚠️ **Keamanan `SETUP_SECRET`**: fungsi `setupInitialDatabase()` menghapus isi 14 sheet.
-> Karena itu aksinya di `doPost` hanya boleh dijalankan dengan `setupKey` yang sama.
-> **Sejak v4.2**, selama `SETUP_SECRET` masih nilai default `GANTI-KUNCI-SETUP-ANDA`,
-> endpoint `setup_database` via HTTP **ditolak total** — tidak bisa terpicu tanpa sengaja
-> meskipun pengirim mengirim nilai default tersebut. Cara paling aman: **jalankan dari
-> editor Apps Script** (bagian 3 di bawah) dan biarkan kunci tidak dibagikan.
+> 🔐 **Sejak v4.3 tidak ada lagi `SETUP_SECRET` dan tidak ada endpoint `setup_database`
+> lewat HTTP.** Fungsi `setupInitialDatabase()` menghapus isi 14 sheet, jadi satu-satunya
+> cara menjalankannya adalah **dari editor Apps Script** (bagian 3 di bawah). Ini
+> menghilangkan seluruh kelas risiko "endpoint destruktif terpicu tanpa sengaja".
+
+> 🗂️ **Opsional — ID spreadsheet tanpa mengedit kode:** buka *Project Settings* →
+> *Script Properties* → tambahkan properti `SPREADSHEET_ID` berisi ID spreadsheet Anda.
+> Berguna saat pindah spreadsheet atau memisahkan lingkungan uji/produksi.
+>
+> 🐞 **Menelusuri error di server:** tambahkan Script Property `DEBUG_ERRORS` = `1`
+> agar respons error menyertakan detail teknis (default: detail tidak dikirim ke klien).
 
 ---
 
@@ -66,11 +70,21 @@ Anda tidak perlu membuat 14 sheet satu per satu secara manual! Fungsi `setupInit
 
 ---
 
-## 4. Install Trigger Perhitungan Otomatis Setiap Malam (Opsional tapi Direkomendasikan)
-Untuk menjalankan retention engine batch dan membersihkan token kedaluwarsa setiap pukul 01:00 malam:
+## 4. Trigger Perhitungan Otomatis Setiap Malam
+Menjalankan retention engine batch (Hijau → Kuning untuk review yang terlewat ≥3 hari)
+dan membersihkan token sesi kedaluwarsa setiap pukul 01:00.
+
+**Sejak v4.3 trigger dipasang OTOMATIS** saat login pertama berhasil
+(`ensureNightlyTrigger()`). Tidak ada lagi ketergantungan pada ingatan operator —
+dulu langkah ini manual, dan bila terlupa, sheet `Sessions` tumbuh tanpa batas
+sehingga semua request menjadi lambat ("putus–nyambung").
+
+Bila ingin memasang / memastikan secara manual:
 1. Di dropdown fungsi Apps Script, pilih fungsi: **`installNightlyTrigger`**.
 2. Klik tombol **Run (Jalankan)**.
-3. Trigger harian sekarang aktif otomatis.
+3. **Verifikasi:** jalankan fungsi **`healthCheck`** — ia melaporkan apakah trigger
+   terpasang, kapan batch terakhir berjalan (`lastNightlyRun`), jumlah baris sheet
+   kunci, dan daftar peringatan yang perlu ditindak.
 
 ---
 
@@ -133,6 +147,18 @@ Agar Frontend (GitHub Pages) dapat berkomunikasi dengan backend:
    memperbaiki pemetaan kolom `Cache_Ayat` dan menambah stale-check: cache yang
    rusak/lama (>30 hari) otomatis diambil ulang. Pastikan Anda memakai `Code.gs`
    versi terbaru (deployment versi baru), lalu uji ulang tes acak ortu.
+8. **Muncul peringatan "Backend Google Apps Script masih vX (frontend vY)"** →
+   deployment yang melayani frontend masih versi lama. Buat deployment versi baru
+   (langkah 5 di atas). Peringatan ini disengaja agar masalah ini tidak lagi
+   tersembunyi.
+9. **Ada pesan "Data mungkin TERSIMPAN" saat menyimpan** → request timeout di sisi
+   klien, tetapi server bisa jadi tetap menyelesaikan penyimpanan. Aplikasi v4.3
+   otomatis memuat ulang data untuk memastikan dan **tidak** menyarankan mengulang.
+   Bila backend masih versi lama (tanpa pengaman anti-dobel), jangan mengulang
+   perintah sebelum memeriksa daftar/riwayat.
+10. **Sheet `Sessions` membengkak / login melambat** → jalankan `healthCheck`:
+    bila trigger tidak terpasang, jalankan `installNightlyTrigger`. Token
+    kedaluwarsa juga dibersihkan otomatis saat ditemukan (lazy cleanup).
 
 ### Cara mengecek performa
 1. Buka Apps Script ➔ **Executions**: lihat durasi & error tiap pemanggilan.

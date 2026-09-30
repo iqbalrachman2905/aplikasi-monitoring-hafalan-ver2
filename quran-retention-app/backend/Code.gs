@@ -13,38 +13,137 @@
  * ============================================================================
  */
 
-// SPREADSHEET ID (Sesuaikan dengan ID Google Spreadsheet Anda)
-const SPREADSHEET_ID = '16Bg7EG0NXQZkELkzB1mb8RorIv8ruLVgi6ZiGEDLMLU';
+// Versi backend. WAJIB dinaikkan bersamaan dengan APP_VERSION di js/config.js
+// agar frontend bisa mendeteksi "backend tertinggal" (deployment versi lama).
+const APP_VERSION = '4.3.0';
+
+// ID Spreadsheet default. TIDAK perlu diedit lagi di kode: nilai ini hanya
+// dipakai bila Script Property 'SPREADSHEET_ID' belum diisi.
+// Cara mengisi (disarankan): Apps Script > Project Settings > Script Properties
+// > tambah properti SPREADSHEET_ID, lalu boleh ganti spreadsheet tanpa edit kode.
+const SPREADSHEET_ID_DEFAULT = '16Bg7EG0NXQZkELkzB1mb8RorIv8ruLVgi6ZiGEDLMLU';
+const SPREADSHEET_ID = readScriptProperty_('SPREADSHEET_ID') || SPREADSHEET_ID_DEFAULT;
 
 // Zona waktu aplikasi: dipakai untuk "hari ini", streak, dan jadwal review.
 // Menghindari bug batas hari (sebelumnya MTor UTC membuat hari berganti 07:00 WIB).
 const APP_TIMEZONE = 'Asia/Jakarta';
 
-// Kunci rahasia untuk menjalankan setupInitialDatabase() lewat HTTP request.
-// Wahai: fungsi itu MENGHAPUS isi 14 sheet, jadi jangan biarkan publik.
-// Paling aman: jalankan setupInitialDatabase() dari editor Apps Script.
-// Guard tambahan: selama kunci masih default, endpoint setup via HTTP ditolak
-// total (lihat doPost), sehingga kegagalan mengganti kunci tidak menjadi celah.
-const SETUP_SECRET = 'GANTI-KUNCI-SETUP-ANDA';
-const SETUP_SECRET_DEFAULT = 'GANTI-KUNCI-SETUP-ANDA';
+// Batas tunggu lock. TOTAL tunggu server HARUS lebih pendek dari timeout klien
+// (lihat APP_CONFIG.API_POLICY di js/config.js), supaya server menyerah lebih
+// dulu dan user menerima pesan E_BUSY — bukan "koneksi putus" palsu.
+const LOCK_WAIT_MS = 5000;   // per percobaan
+const LOCK_ATTEMPTS = 2;     // 2 x 5 dtk = maksimal ~10 dtk
+
+// Berapa lama hasil sebuah request tulis disimpan untuk mencegah dobEL saat
+// klien mengirim ulang request yang sama (idempotency key).
+const IDEMPOTENCY_TTL_SEC = 600;
+
+// Penanda versi skema/trigger yang sudah dipasang.
+const PROP_TRIGGER_FLAG = 'trigger_installed_v1';
+const PROP_LAST_NIGHTLY_RUN = 'SYNC_STATE_LAST_NIGHTLY_RUN';
+
+/**
+ * Capability yang diiklankan ke frontend pada SETIAP respons. Klien memakainya
+ * untuk tahu fitur backend mana yang tersedia (mis. idempotency) sehingga
+ * perilaku aman-nya tidak menebak-nebak.
+ */
+const SERVER_CAPABILITIES = {
+  appVersion: APP_VERSION,
+  idempotency: true,
+  errorCodes: true,
+  requestId: true,
+  feedbackToNotif: true,
+  notifMarkRead: true,
+  lazySessionCleanup: true,
+  selfInstallTrigger: true
+};
+
+/** Baca Script Property dengan aman (PropertiesService bisa gagal di beberapa konteks). */
+function readScriptProperty_(key) {
+  try {
+    return PropertiesService.getScriptProperties().getProperty(key) || '';
+  } catch (e) {
+    return '';
+  }
+}
+
+/** Tulis Script Property dengan aman. */
+function writeScriptProperty_(key, value) {
+  try {
+    PropertiesService.getScriptProperties().setProperty(key, String(value));
+    return true;
+  } catch (e) {
+    Logger.log('gagal menulis properti ' + key + ': ' + e);
+    return false;
+  }
+}
 
 // ============================================================================
 // ENTRY POINTS (doGet & doPost)
 // ============================================================================
 
 function doGet(e) {
+  // Berguna sebagai health check sederhana: versi backend + capability.
   return responseJSON({
+    success: true,
     status: 'API Aktif',
     nama: 'Quran Retention Engine API',
-    versi: '4.0.0',
+    versi: APP_VERSION,
+    capabilities: SERVER_CAPABILITIES,
     timestamp: new Date().toISOString()
   });
+}
+
+/**
+ * Jalur idempotensi: bila klien mengirim requestId yang sudah pernah diproses,
+ * kembalikan hasil yang sama TANPA mengeksekusi ulang. Ini yang mencegah data
+ * dobel saat request sebenarnya sukses tetapi klien menganggapnya timeout.
+ *
+ * @param {object} request body JSON dari klien (punya requestId & action)
+ * @param {function(): object} work fungsi yang menghasilkan respons JSON
+ */
+function withIdempotency(request, work) {
+  const requestId = request && request.requestId ? String(request.requestId) : '';
+  if (!requestId) return work();
+
+  let cache = null;
+  try {
+    cache = CacheService.getScriptCache();
+  } catch (e) {
+    return work(); // cache tidak tersedia -> jalankan normal
+  }
+
+  const cacheKey = 'idem:' + requestId;
+  try {
+    const cached = cache.get(cacheKey);
+    if (cached) {
+      const parsed = JSON.parse(cached);
+      parsed.duplicate = true; // penanda: hasil diambil dari pemanggilan sebelumnya
+      return parsed;
+    }
+  } catch (e) {
+    Logger.log('idempotency read gagal: ' + e);
+  }
+
+  const result = work();
+
+  // Hanya simpan hasil yang benar-benar sukses, supaya request yang gagal
+  // (mis. E_BUSY) tetap bisa dicoba ulang oleh klien.
+  try {
+    if (result && result.success) {
+      cache.put(cacheKey, JSON.stringify(result), IDEMPOTENCY_TTL_SEC);
+    }
+  } catch (e) {
+    Logger.log('idempotency write gagal: ' + e);
+  }
+
+  return result;
 }
 
 function doPost(e) {
   try {
     if (!e || !e.postData || !e.postData.contents) {
-      return responseJSON({ success: false, message: 'Request payload kosong' });
+      return responseJSON({ success: false, code: 'E_VALIDATION', message: 'Request payload kosong' });
     }
 
     const request = JSON.parse(e.postData.contents);
@@ -52,30 +151,24 @@ function doPost(e) {
 
     // Public / Non-token action
     if (action === 'login') {
-      return responseJSON(loginUser(request.username, request.password));
+      const loginResult = loginUser(request.username, request.password);
+      // Perawatan ringan setelah login sukses: pastikan trigger malam terpasang.
+      if (loginResult && loginResult.success) ensureNightlyTrigger();
+      return responseJSON(loginResult);
     }
-    if (action === 'setup_database') {
-      // Endpoint destruktif (clear 14 sheet) -> wajib menyertakan kunci rahasia.
-      // Bila kunci masih bawaan repo (belum pernah diganti), endpoint ditolak
-      // meskipun pengirim kebetulan mengirim nilai default yang sama.
-      if (!SETUP_SECRET || SETUP_SECRET === SETUP_SECRET_DEFAULT || request.setupKey !== SETUP_SECRET) {
-        return responseJSON({
-          success: false,
-          message: 'Akses setup ditolak. Jalankan setupInitialDatabase() langsung dari editor Apps Script.'
-        });
-      }
-      return responseJSON(setupInitialDatabase());
-    }
+    // CATATAN: endpoint 'setup_database' lewat HTTP sudah DIHAPUS (v4.3).
+    // setupInitialDatabase() menghapus isi 14 sheet; jalankan HANYA dari editor
+    // Apps Script. Fungsi GAS tidak terkspos via HTTP, jadi ini aman.
 
     // Token-required actions
     const token = request.token;
     if (!token) {
-      return responseJSON({ success: false, message: 'Token sesi diperlukan' });
+      return responseJSON({ success: false, code: 'E_AUTH', message: 'Token sesi diperlukan' });
     }
 
     const session = validateSession(token);
     if (!session) {
-      return responseJSON({ success: false, message: 'Sesi tidak valid atau telah kedaluwarsa', unauthorized: true });
+      return responseJSON({ success: false, code: 'E_AUTH', unauthorized: true, message: 'Sesi tidak valid atau telah kedaluwarsa' });
     }
 
     // Route actions
@@ -89,6 +182,9 @@ function doPost(e) {
       case 'get_profile':
         return responseJSON(getUserProfile(session));
 
+      case 'health_check':
+        return responseJSON(healthCheck(session));
+
       // --- USTAZ ENDPOINTS ---
       case 'ustaz_get_dashboard':
         return responseJSON(ustazGetDashboard(session));
@@ -97,29 +193,29 @@ function doPost(e) {
         return responseJSON(ustazGetSantriDetail(session, request.santriId));
 
       case 'ustaz_add_setoran':
-        return responseJSON(ustazAddSetoran(session, request.data));
+        return responseJSON(withIdempotency(request, function () { return ustazAddSetoran(session, request.data); }));
 
       case 'ustaz_save_target':
-        return responseJSON(ustazSaveTarget(session, request.data));
+        return responseJSON(withIdempotency(request, function () { return ustazSaveTarget(session, request.data); }));
 
       case 'ustaz_send_feedback':
-        return responseJSON(ustazSendFeedback(session, request.data));
+        return responseJSON(withIdempotency(request, function () { return ustazSendFeedback(session, request.data); }));
 
       case 'ustaz_send_broadcast':
-        return responseJSON(ustazSendBroadcast(session, request.data));
+        return responseJSON(withIdempotency(request, function () { return ustazSendBroadcast(session, request.data); }));
 
       // --- SANTRI ENDPOINTS ---
       case 'santri_get_dashboard':
         return responseJSON(santriGetDashboard(session));
 
       case 'santri_confirm_murojaah':
-        return responseJSON(santriConfirmMurojaah(session, request.data));
+        return responseJSON(withIdempotency(request, function () { return santriConfirmMurojaah(session, request.data); }));
 
       case 'santri_submit_flashcard_test':
-        return responseJSON(santriSubmitFlashcard(session, request.data));
+        return responseJSON(withIdempotency(request, function () { return santriSubmitFlashcard(session, request.data); }));
 
       case 'santri_mark_notif_read':
-        return responseJSON(markNotificationRead(session, request.notifId));
+        return responseJSON(withIdempotency(request, function () { return markNotificationRead(session, request.notifId); }));
 
       // --- ORTU ENDPOINTS ---
       case 'ortu_get_dashboard':
@@ -129,30 +225,70 @@ function doPost(e) {
         return responseJSON(ortuGetRandomTest(session));
 
       case 'ortu_submit_test_result':
-        return responseJSON(ortuSubmitTestResult(session, request.data));
+        return responseJSON(withIdempotency(request, function () { return ortuSubmitTestResult(session, request.data); }));
 
       case 'ortu_send_apresiasi':
-        return responseJSON(ortuSendApresiasi(session, request.data));
+        return responseJSON(withIdempotency(request, function () { return ortuSendApresiasi(session, request.data); }));
 
       // --- QURAN CACHE ENDPOINTS ---
       case 'get_ayah_content':
         return responseJSON(getAyahContent(request.surah, request.ayah));
 
       default:
-        return responseJSON({ success: false, message: 'Action tidak ditemukan: ' + action });
+        return responseJSON({ success: false, code: 'E_VALIDATION', message: 'Action tidak ditemukan: ' + action });
     }
   } catch (error) {
+    // Detail teknis TIDAK dikirim ke klien (mencegah kebocoran internal);
+    // aktifkan Script Property DEBUG_ERRORS=1 bila sedang menelusuri masalah.
+    Logger.log('doPost error: ' + error + '\n' + (error && error.stack ? error.stack : ''));
+    const debug = readScriptProperty_('DEBUG_ERRORS') === '1';
     return responseJSON({
       success: false,
-      message: 'Terjadi kesalahan pemrosesan server',
-      error: error.toString()
+      code: 'E_UNKNOWN',
+      message: 'Terjadi kesalahan pada server. Coba lagi sebentar; bila berulang hubungi admin.',
+      error: debug ? error.toString() : undefined
     });
   }
 }
 
 function responseJSON(data) {
-  return ContentService.createTextOutput(JSON.stringify(data))
+  // Semua respons membawa versi + capability agar frontend selalu tahu
+  // apakah deployment backend sudah diperbarui (masalah "sudah dibenerin
+  // tapi masih error" biasanya karena deployment versi lama masih dipakai).
+  const payload = (data && typeof data === 'object' && !Array.isArray(data)) ? data : { success: true, data: data };
+  if (typeof payload.appVersion === 'undefined') payload.appVersion = APP_VERSION;
+  if (typeof payload.capabilities === 'undefined') payload.capabilities = SERVER_CAPABILITIES;
+  return ContentService.createTextOutput(JSON.stringify(payload))
     .setMimeType(ContentService.MimeType.JSON);
+}
+
+/** Respons standar saat lock tidak didapat (retryable di sisi klien). */
+function busyResponse() {
+  return {
+    success: false,
+    code: 'E_BUSY',
+    retryable: true,
+    message: 'Server sedang sibuk menyimpan data. Coba lagi sebentar lagi.'
+  };
+}
+
+/**
+ * Jalankan pekerjaan tulis di dalam LockService dengan flush() di akhir.
+ * Pola tunggal untuk SEMUA endpoint tulis agar tidak ada lagi endpoint yang
+ * lupa memakai lock (sumber duplikasi/persaingan tulis).
+ *
+ * @param {function(): object} work
+ * @returns {object} hasil kerja, atau busyResponse() bila lock gagal didapat
+ */
+function withLock(work) {
+  const lock = LockService.getScriptLock();
+  if (!acquireLock(lock)) return busyResponse();
+  try {
+    return work();
+  } finally {
+    try { SpreadsheetApp.flush(); } catch (flushErr) { Logger.log('flush gagal: ' + flushErr); }
+    lock.releaseLock();
+  }
 }
 
 // ============================================================
@@ -194,18 +330,19 @@ function getSheet(sheetName) {
 }
 
 /**
- * Akuisisi lock dengan retry + backoff, lalu MENANDai bila gagal.
- * waitLock(5000) terlalu pendek saat antrean tulis menumpuk (penyebab
- * kegagalan "Server sibuk" yang sering dialami pengguna).
+ * Akuisisi lock dengan retry + backoff singkat.
+ * Total tunggu dibatasi (LOCK_ATTEMPTS x LOCK_WAIT_MS) dan SELALU lebih pendek
+ * dari timeout klien, supaya user menerima pesan "server sibuk" yang jujur
+ * alih-alih "koneksi putus" padahal server masih bekerja.
  */
 function acquireLock(lock, timeoutMs) {
-  const timeout = Number(timeoutMs) || 15000;
-  for (let attempt = 0; attempt < 3; attempt++) {
+  const timeout = Number(timeoutMs) || LOCK_WAIT_MS;
+  for (let attempt = 0; attempt < LOCK_ATTEMPTS; attempt++) {
     try {
       lock.waitLock(timeout);
       return true;
     } catch (e) {
-      Utilities.sleep(250 * (attempt + 1));
+      Utilities.sleep(200 * (attempt + 1));
     }
   }
   return false;
@@ -302,13 +439,13 @@ function verifyPassword(plainPassword, storedHash) {
 
 function loginUser(username, password) {
   if (!username || !password) {
-    return { success: false, message: 'Username dan password wajib diisi' };
+    return { success: false, code: 'E_VALIDATION', message: 'Username dan password wajib diisi' };
   }
 
   const sheet = getSheet('Users');
   const data = sheet.getDataRange().getValues();
   if (data.length <= 1) {
-    return { success: false, message: 'Database pengguna kosong. Silakan setup database terlebih dahulu.' };
+    return { success: false, code: 'E_VALIDATION', message: 'Database pengguna kosong. Jalankan setupInitialDatabase() dari editor Apps Script.' };
   }
 
   for (let i = 1; i < data.length; i++) {
@@ -321,7 +458,7 @@ function loginUser(username, password) {
 
       const token = saveSession(userId, role, idTerkait, nama);
       if (!token) {
-        return { success: false, message: 'Gagal membuat sesi, server sedang sibuk' };
+        return { success: false, code: 'E_BUSY', retryable: true, message: 'Server sedang sibuk membuat sesi. Coba lagi sebentar.' };
       }
 
       return {
@@ -335,7 +472,7 @@ function loginUser(username, password) {
     }
   }
 
-  return { success: false, message: 'Username atau password salah' };
+  return { success: false, code: 'E_AUTH', message: 'Username atau password salah' };
 }
 
 function saveSession(userId, role, idTerkait, nama) {
@@ -372,6 +509,23 @@ function validateSession(token) {
     if (data[i][0] === token) {
       const expiryDate = new Date(data[i][3]);
       if (expiryDate < now) {
+        // Lazy cleanup: hapus token kedaluwarsa yang kebetulan ditemukan.
+        // Ini jaring pengaman bila trigger malam belum/tidak pernah terpasang,
+        // supaya sheet Sessions tidak tumbuh selamanya. Lock singkat + tidak
+        // memblokir request: bila lock tidak didapat, lanjut saja.
+        try {
+          const lock = LockService.getScriptLock();
+          if (lock.tryLock(1500)) {
+            try {
+              sheet.deleteRow(i + 1);
+              SpreadsheetApp.flush();
+            } finally {
+              lock.releaseLock();
+            }
+          }
+        } catch (cleanupErr) {
+          Logger.log('lazy cleanup sesi gagal (diabaikan): ' + cleanupErr);
+        }
         return null; // Expired
       }
       return {
@@ -388,7 +542,7 @@ function validateSession(token) {
 function logoutUser(token) {
   const lock = LockService.getScriptLock();
   if (!acquireLock(lock)) {
-    return { success: false, message: 'Server sedang sibuk menyimpan data. Coba lagi sebentar.' };
+    return busyResponse();
   }
 
   try {
@@ -779,7 +933,7 @@ function generateDailyMissions(santriId, config) {
 // --- 1. USTAZ DASHBOARD ---
 function ustazGetDashboard(session) {
   if (session.role !== 'ustaz') {
-    return { success: false, message: 'Akses khusus Ustaz' };
+    return { success: false, code: 'E_FORBIDDEN', message: 'Akses khusus Ustaz' };
   }
 
   const santriSheet = getSheet('Santri');
@@ -948,11 +1102,18 @@ function ustazGetDashboard(session) {
 
 // Ustaz Add Setoran
 function ustazAddSetoran(session, payload) {
-  if (session.role !== 'ustaz') return { success: false, message: 'Unauthorized' };
+  if (session.role !== 'ustaz') return { success: false, code: 'E_FORBIDDEN', message: 'Unauthorized' };
+
+  // Otorisasi (PRD Section 16): ustaz hanya boleh mencatat setoran untuk santri
+  // kelompoknya. Sebelumnya cek ini hanya ada di ustazGetSantriDetail sehingga
+  // ID santri mana pun bisa dikirim dari klien (celah IDOR).
+  if (!payload || !isSantriInUstazGroup(session, payload.idSantri)) {
+    return { success: false, code: 'E_FORBIDDEN', message: 'Santri ini bukan bagian dari kelompok bimbingan Anda' };
+  }
 
   const lock = LockService.getScriptLock();
   if (!acquireLock(lock)) {
-    return { success: false, message: 'Server sedang sibuk menyimpan data. Coba lagi sebentar.' };
+    return busyResponse();
   }
 
   try {
@@ -1068,11 +1229,16 @@ function ustazAddSetoran(session, payload) {
 
 // Ustaz Save Target
 function ustazSaveTarget(session, payload) {
-  if (session.role !== 'ustaz') return { success: false, message: 'Unauthorized' };
+  if (session.role !== 'ustaz') return { success: false, code: 'E_FORBIDDEN', message: 'Unauthorized' };
+
+  // Otorisasi (PRD Section 16): target hanya untuk santri kelompok ustaz ini.
+  if (!payload || !isSantriInUstazGroup(session, payload.idSantri)) {
+    return { success: false, code: 'E_FORBIDDEN', message: 'Santri ini bukan bagian dari kelompok bimbingan Anda' };
+  }
 
   const lock = LockService.getScriptLock();
   if (!acquireLock(lock)) {
-    return { success: false, message: 'Server sedang sibuk menyimpan data. Coba lagi sebentar.' };
+    return busyResponse();
   }
 
   try {
@@ -1114,32 +1280,61 @@ function ustazSaveTarget(session, payload) {
 }
 
 // Ustaz Send Feedback
+// Temuan v4.2: fungsi ini menulis ke sheet 'Feedback' yang TIDAK PERNAH dibaca
+// oleh dashboard Santri, sehingga feedback ustaz "hilang" (di Mode Demo tampak
+// berhasil karena mock menulis ke notifications). Sejak v4.3 feedback ditulis
+// ke DUA tempat: sheet Feedback (arsip pedagogis per setoran) DAN sheet
+// Notifikasi (yang benar-benar dibaca dashboard Santri) — sama seperti
+// ortuSendApresiasi.
 function ustazSendFeedback(session, payload) {
-  if (session.role !== 'ustaz') return { success: false, message: 'Unauthorized' };
+  if (session.role !== 'ustaz') return { success: false, code: 'E_FORBIDDEN', message: 'Unauthorized' };
+  if (!payload || !payload.pesan) {
+    return { success: false, code: 'E_VALIDATION', message: 'Pesan feedback wajib diisi' };
+  }
 
-  const feedbackSheet = getSheet('Feedback');
-  const todayStr = appTodayStr();
-  feedbackSheet.appendRow([
-    Utilities.getUuid(),
-    payload.idSantri,
-    payload.idHafalan || '',
-    session.userId,
-    payload.pesan,
-    todayStr,
-    'Belum'
-  ]);
+  // Otorisasi (PRD Section 16): ustaz hanya untuk santri kelompoknya.
+  if (!isSantriInUstazGroup(session, payload.idSantri)) {
+    return { success: false, code: 'E_FORBIDDEN', message: 'Santri ini bukan bagian dari kelompok bimbingan Anda' };
+  }
 
-  return { success: true, message: 'Feedback berhasil dikirim ke santri' };
+  return withLock(function () {
+    const feedbackSheet = getSheet('Feedback');
+    const notifSheet = getSheet('Notifikasi');
+    const todayStr = appTodayStr();
+
+    feedbackSheet.appendRow([
+      Utilities.getUuid(),
+      payload.idSantri,
+      payload.idHafalan || '',
+      session.userId,
+      payload.pesan,
+      todayStr,
+      'Belum'
+    ]);
+
+    // Baris inilah yang dibaca santriGetDashboard(). Tipe memakai awalan
+    // 'Feedback Ustaz' agar ikon 📖 di dashboard santri otomatis terpakai.
+    notifSheet.appendRow([
+      Utilities.getUuid(),
+      payload.idSantri,
+      'Feedback Ustaz',
+      `Ustaz ${session.nama}: "${payload.pesan}"`,
+      todayStr,
+      'Belum'
+    ]);
+
+    return { success: true, message: 'Feedback berhasil dikirim ke santri' };
+  });
 }
 
 // Ustaz Send Broadcast
 function ustazSendBroadcast(session, payload) {
-  if (session.role !== 'ustaz') return { success: false, message: 'Unauthorized' };
+  if (session.role !== 'ustaz') return { success: false, code: 'E_FORBIDDEN', message: 'Unauthorized' };
   if (!payload || !payload.pesan) return { success: false, message: 'Pesan broadcast wajib diisi' };
 
   const lock = LockService.getScriptLock();
   if (!acquireLock(lock)) {
-    return { success: false, message: 'Server sedang sibuk. Coba lagi sebentar.' };
+    return busyResponse();
   }
 
   try {
@@ -1152,9 +1347,19 @@ function ustazSendBroadcast(session, payload) {
     // Sebelumnya appendRow dipanggil per santri — penyebab broadcast lambat /
     // timeout ketika jumlah santri banyak.
     const rows = [];
+    let skipped = 0;
     for (let i = 1; i < santriData.length; i++) {
       const idSantri = String(santriData[i][0]);
       if (!idSantri) continue;
+
+      // v4.3: broadcast dibatasi ke kelompok bimbingan ustaz ini (PRD Section 16).
+      // Santri dengan ID_Ustaz kosong tetap diikutkan (aturan sama dengan
+      // isSantriInUstazGroup) supaya data migrasi tidak kehilangan pengumuman.
+      const idUstazSantri = String(santriData[i][2] || '');
+      const inGroup = !idUstazSantri || idUstazSantri === session.userId ||
+        (!!session.idTerkait && idUstazSantri === session.idTerkait);
+      if (!inGroup) { skipped++; continue; }
+
       rows.push([
         Utilities.getUuid(),
         idSantri,
@@ -1164,11 +1369,14 @@ function ustazSendBroadcast(session, payload) {
         'Belum'
       ]);
     }
+    if (rows.length === 0) {
+      return { success: false, code: 'E_VALIDATION', message: 'Tidak ada santri dalam kelompok bimbingan Anda untuk dikirimi pesan.' };
+    }
     if (rows.length > 0) {
       notifSheet.getRange(notifSheet.getLastRow() + 1, 1, rows.length, 6).setValues(rows);
     }
 
-    return { success: true, message: 'Pesan broadcast terkirim ke seluruh santri' };
+    return { success: true, message: 'Pesan broadcast terkirim ke ' + rows.length + ' santri bimbingan Anda' + (skipped > 0 ? ' (' + skipped + ' santri di luar kelompok dilewati)' : '') };
   } finally {
     // Pastikan tulisan benar-benar ter-commit sebelum lock dilepas, agar
     // request berikutnya tidak membaca data lama.
@@ -1204,7 +1412,7 @@ function ustazGetSantriDetail(session, santriId) {
   // santri hanya untuk datanya sendiri.
   const isSantriSelf = session.role === 'santri' && String(santriId) === String(session.userId);
   if (!isSantriSelf && session.role !== 'ustaz') {
-    return { success: false, message: 'Akses ditolak' };
+    return { success: false, code: 'E_FORBIDDEN', message: 'Akses ditolak' };
   }
   if (session.role === 'ustaz' && !isSantriInUstazGroup(session, santriId)) {
     return { success: false, message: 'Santri ini bukan bagian dari kelompok bimbingan Anda' };
@@ -1350,7 +1558,7 @@ function santriGetDashboard(session) {
 function santriConfirmMurojaah(session, payload) {
   // Otorisasi: hanya santri (atau admin) yang boleh mengonfirmasi murojaah.
   if (session.role !== 'santri' && session.role !== 'admin') {
-    return { success: false, message: 'Akses khusus Santri' };
+    return { success: false, code: 'E_FORBIDDEN', message: 'Akses khusus Santri' };
   }
 
   const santriId = session.role === 'santri' ? session.userId : (payload.idSantri || session.idTerkait);
@@ -1358,7 +1566,7 @@ function santriConfirmMurojaah(session, payload) {
     return { success: false, message: 'ID santri tidak ditemukan' };
   }  const lock = LockService.getScriptLock();
   if (!acquireLock(lock)) {
-    return { success: false, message: 'Server sedang sibuk menyimpan data. Coba lagi sebentar.' };
+    return busyResponse();
   }
 
   try {
@@ -1413,33 +1621,39 @@ function santriConfirmMurojaah(session, payload) {
 }
 
 // Santri Submit Flashcard
+// v4.3: dibungkus withLock(). Ini penulisan PALING SERING di aplikasi (1x per
+// kartu flashcard) dan menyentuh Master_Hafalan + Gamifikasi + Badge, sehingga
+// tanpa lock bisa saling menimpa / menghasilkan XP tidak konsisten.
 function santriSubmitFlashcard(session, payload) {
   if (session.role !== 'santri' && session.role !== 'admin') {
-    return { success: false, message: 'Akses khusus Santri' };
+    return { success: false, code: 'E_FORBIDDEN', message: 'Akses khusus Santri' };
   }
 
   const santriId = session.role === 'santri' ? session.userId : session.idTerkait;
   if (!santriId) {
-    return { success: false, message: 'ID santri tidak ditemukan' };
-  }
-  const config = getConfigMap();
-
-  let recoveryAchieved = false;
-  if (payload.idMaster) {
-    const res = updateMasterHafalanCache(payload.idMaster, payload.isCorrect ? 'Lancar' : 'Tersendat', config);
-    if (res && res.recoveryAchieved) recoveryAchieved = true;
+    return { success: false, code: 'E_VALIDATION', message: 'ID santri tidak ditemukan' };
   }
 
-  const baseXP = payload.isCorrect ? 5 : 1;
-  // isQualifying=false: flashcard bukan misi Sabaq/Sabqi/Manzil, jadi sesuai
-  // PRD 13.3 jawaban flashcard menambah XP tetapi TIDAK menambah streak.
-  const gamifResult = awardXPAndQualifyingActivity(santriId, baseXP, 0, false, recoveryAchieved, config);
+  return withLock(function () {
+    const config = getConfigMap();
 
-  return {
-    success: true,
-    message: payload.isCorrect ? 'Jawaban Benar! +5 XP' : 'Tetap Semangat! +1 XP',
-    gamifikasi: gamifResult
-  };
+    let recoveryAchieved = false;
+    if (payload && payload.idMaster) {
+      const res = updateMasterHafalanCache(payload.idMaster, payload.isCorrect ? 'Lancar' : 'Tersendat', config);
+      if (res && res.recoveryAchieved) recoveryAchieved = true;
+    }
+
+    const baseXP = (payload && payload.isCorrect) ? 5 : 1;
+    // isQualifying=false: flashcard bukan misi Sabaq/Sabqi/Manzil, jadi sesuai
+    // PRD 13.3 jawaban flashcard menambah XP tetapi TIDAK menambah streak.
+    const gamifResult = awardXPAndQualifyingActivity(santriId, baseXP, 0, false, recoveryAchieved, config);
+
+    return {
+      success: true,
+      message: (payload && payload.isCorrect) ? 'Jawaban Benar! +5 XP' : 'Tetap Semangat! +1 XP',
+      gamifikasi: gamifResult
+    };
+  });
 }
 
 function markNotificationRead(session, notifId) {
@@ -1447,7 +1661,7 @@ function markNotificationRead(session, notifId) {
 
   const lock = LockService.getScriptLock();
   if (!acquireLock(lock)) {
-    return { success: false, message: 'Server sedang sibuk. Coba lagi sebentar.' };
+    return busyResponse();
   }
 
   try {
@@ -1476,7 +1690,7 @@ function markNotificationRead(session, notifId) {
 // --- 3. ORTU DASHBOARD & SMART RANDOM TEST ---
 function ortuGetDashboard(session) {
   if (session.role !== 'ortu' && session.role !== 'admin') {
-    return { success: false, message: 'Akses khusus Orang Tua' };
+    return { success: false, code: 'E_FORBIDDEN', message: 'Akses khusus Orang Tua' };
   }
 
   const santriId = session.idTerkait;
@@ -1593,7 +1807,7 @@ function ortuGetDashboard(session) {
 // Ortu Smart Random Test (PRD Section 12)
 function ortuGetRandomTest(session) {
   if (session.role !== 'ortu' && session.role !== 'admin') {
-    return { success: false, message: 'Akses khusus Orang Tua' };
+    return { success: false, code: 'E_FORBIDDEN', message: 'Akses khusus Orang Tua' };
   }
 
   const santriId = session.idTerkait;
@@ -1673,7 +1887,7 @@ function ortuGetRandomTest(session) {
 // Ortu Submit Test Result (1-Click Evaluation)
 function ortuSubmitTestResult(session, payload) {
   if (session.role !== 'ortu' && session.role !== 'admin') {
-    return { success: false, message: 'Akses khusus Orang Tua' };
+    return { success: false, code: 'E_FORBIDDEN', message: 'Akses khusus Orang Tua' };
   }
 
   const santriId = session.idTerkait;
@@ -1681,7 +1895,7 @@ function ortuSubmitTestResult(session, payload) {
     return { success: false, message: 'Akun ini belum terhubung ke data santri (ID_Terkait kosong)' };
   }  const lock = LockService.getScriptLock();
   if (!acquireLock(lock)) {
-    return { success: false, message: 'Server sedang sibuk menyimpan data. Coba lagi sebentar.' };
+    return busyResponse();
   }
 
   try {
@@ -1740,39 +1954,61 @@ function ortuSubmitTestResult(session, payload) {
 }
 
 // Ortu Kirim Apresiasi
+// v4.3: memakai withLock() — sebelumnya endpoint tulis ini tanpa lock,
+// tidak konsisten dengan endpoint tulis lain (risiko tulis hilang saat ramai).
 function ortuSendApresiasi(session, payload) {
   if (session.role !== 'ortu' && session.role !== 'admin') {
-    return { success: false, message: 'Akses khusus Orang Tua' };
+    return { success: false, code: 'E_FORBIDDEN', message: 'Akses khusus Orang Tua' };
   }
 
   const santriId = session.idTerkait;
   if (!santriId) {
-    return { success: false, message: 'Akun ini belum terhubung ke data santri (ID_Terkait kosong)' };
+    return { success: false, code: 'E_VALIDATION', message: 'Akun ini belum terhubung ke data santri (ID_Terkait kosong)' };
   }
 
-  const notifSheet = getSheet('Notifikasi');
-  const todayStr = appTodayStr();
+  return withLock(function () {
+    const notifSheet = getSheet('Notifikasi');
+    const todayStr = appTodayStr();
 
-  notifSheet.appendRow([
-    Utilities.getUuid(),
-    santriId,
-    'Apresiasi Ortu',
-    `Pesan Semangat dari Orang Tua (${session.nama}): "${payload.pesan || 'Semangat terus menghafal ya Ananda, Ayah & Bunda selalu mendoakan!'}" ❤️`,
-    todayStr,
-    'Belum'
-  ]);
+    notifSheet.appendRow([
+      Utilities.getUuid(),
+      santriId,
+      'Apresiasi Ortu',
+      `Pesan Semangat dari Orang Tua (${session.nama}): "${payload.pesan || 'Semangat terus menghafal ya Ananda, Ayah & Bunda selalu mendoakan!'}" ❤️`,
+      todayStr,
+      'Belum'
+    ]);
 
-  return { success: true, message: 'Pesan apresiasi berhasil dikirim ke Ananda!' };
+    return { success: true, message: 'Pesan apresiasi berhasil dikirim ke Ananda!' };
+  });
 }
 
 // ============================================================
 // QURAN API & AYAH CACHE
 // ============================================================
 
+/**
+ * Tulis 1 baris cache ayat bila belum ada — dijalankan di dalam lock singkat.
+ * Lock hanya membungkus "cek + tulis" (bukan fetch jaringan) agar antrean tulis
+ * tidak tertahan oleh lamanya respons provider eksternal.
+ */
+function appendAyahCacheIfMissing(cacheSheet, surah, ayahNum, arabicText, audioUrl, translationText) {
+  return withLock(function () {
+    const rows = cacheSheet.getDataRange().getValues();
+    for (let i = 1; i < rows.length; i++) {
+      if (String(rows[i][0]) === String(surah) && Number(rows[i][1]) === Number(ayahNum)) {
+        return { success: true, skipped: true }; // sudah ada -> tidak menulis ulang
+      }
+    }
+    cacheSheet.appendRow([surah, ayahNum, arabicText, audioUrl, new Date().toISOString(), translationText]);
+    return { success: true };
+  });
+}
+
 function getAyahContent(surah, ayah) {
   const ayahNum = Number(ayah);
   if (!ayahNum || ayahNum < 1) {
-    return { success: false, message: 'Nomor ayat tidak valid' };
+    return { success: false, code: 'E_VALIDATION', message: 'Nomor ayat tidak valid' };
   }  const cacheSheet = getSheet('Cache_Ayat');
   const cacheData = cacheSheet.getDataRange().getValues();
 
@@ -1820,6 +2056,7 @@ function getAyahContent(surah, ayah) {
         if (!target) {
           return {
             success: false,
+            code: 'E_VALIDATION',
             message: `Ayat ${ayahNum} tidak ditemukan pada surah ${surahNumber}`
           };
         }
@@ -1833,8 +2070,10 @@ function getAyahContent(surah, ayah) {
           ? target.audio['01']
           : (resJson.data.audioFull ? resJson.data.audioFull['01'] : '');
 
-        // Simpan ke Cache_Ayat (kolom 6: Teks_Indonesia, opsional).
-        cacheSheet.appendRow([surah, ayahNum, arabicText, audioUrl, new Date().toISOString(), translationText]);
+        // Simpan ke Cache_Ayat di dalam lock singkat + cek ulang, supaya dua
+        // request bersamaan untuk ayat yang sama tidak menghasilkan baris cache
+        // kembar (dulu appendRow langsung tanpa lock).
+        appendAyahCacheIfMissing(cacheSheet, surah, ayahNum, arabicText, audioUrl, translationText);
 
         return {
           success: true,
@@ -1858,6 +2097,7 @@ function getAyahContent(surah, ayah) {
     success: false,
     surah: surah,
     ayah: ayahNum,
+    code: 'E_UPSTREAM',
     message: 'Teks ayat belum tersedia (cache kosong & provider eksternal tidak merespons)'
   };
 }
@@ -1921,6 +2161,12 @@ function runNightlyRetentionRecompute() {
   if (blockEnd !== -1) {
     sessionSheet.deleteRows(blockStart, blockEnd - blockStart + 1);
   }
+
+  // Catat jejak eksekusi agar healthCheck() bisa membuktikan batch benar-benar
+  // berjalan (dulu tidak ada jejak apa pun, sehingga "trigger lupa dipasang"
+  // tidak terdeteksi sampai sistem terasa lambat).
+  writeScriptProperty_(PROP_LAST_NIGHTLY_RUN, new Date().toISOString());
+  return { success: true, ranAt: readScriptProperty_(PROP_LAST_NIGHTLY_RUN) };
 }
 
 // Install Trigger otomatis setiap jam 01:00 malam
@@ -1937,6 +2183,89 @@ function installNightlyTrigger() {
     .everyDays(1)
     .atHour(1)
     .create();
+
+  writeScriptProperty_(PROP_TRIGGER_FLAG, new Date().toISOString());
+  return { success: true, message: 'Trigger malam tiap 01:00 terpasang.' };
+}
+
+/**
+ * Pastikan trigger malam terpasang TANPA perlu langkah manual di editor.
+ * Dipanggil setiap login sukses (frekuensi rendah) dan idempoten:
+ * bila penanda sudah ada, fungsi ini tidak melakukan apa-apa.
+ *
+ * Latar belakang: sebelumnya installNightlyTrigger() tidak dipanggil dari mana
+ * pun, sehingga sheet Sessions tak pernah dibersihkan dan validateSession makin
+ * lambat — salah satu pemicu lingkaran "putus/nyambung".
+ */
+function ensureNightlyTrigger() {
+  try {
+    if (readScriptProperty_(PROP_TRIGGER_FLAG)) return false; // sudah pernah dipasang
+
+    const triggers = ScriptApp.getProjectTriggers();
+    for (let i = 0; i < triggers.length; i++) {
+      if (triggers[i].getHandlerFunction() === 'runNightlyRetentionRecompute') {
+        writeScriptProperty_(PROP_TRIGGER_FLAG, new Date().toISOString());
+        return false;
+      }
+    }
+
+    installNightlyTrigger();
+    Logger.log('Trigger malam otomatis dipasang (ensureNightlyTrigger).');
+    return true;
+  } catch (e) {
+    // Jangan pernah menggagalkan login hanya karena trigger tidak bisa dipasang.
+    Logger.log('ensureNightlyTrigger gagal (diabaikan): ' + e);
+    return false;
+  }
+}
+
+/**
+ * Status kesehatan sistem — untuk menjawab "kenapa lambat / data tidak terlihat".
+ * Panggil dari editor Apps Script, atau lewat action 'health_check' (khusus ustaz).
+ */
+function healthCheck(session) {
+  if (session && session.role !== 'ustaz' && session.role !== 'admin') {
+    return { success: false, code: 'E_FORBIDDEN', message: 'Akses khusus Ustaz' };
+  }
+
+  const out = {
+    success: true,
+    appVersion: APP_VERSION,
+    timezone: APP_TIMEZONE,
+    spreadsheetId: SPREADSHEET_ID ? (SPREADSHEET_ID.slice(0, 6) + '…(tersembunyi)') : '(belum diisi)',
+    trigger: { installed: false, handler: 'runNightlyRetentionRecompute' },
+    lastNightlyRun: readScriptProperty_(PROP_LAST_NIGHTLY_RUN) || '(belum pernah)',
+    sheets: {},
+    warnings: []
+  };
+
+  try {
+    const triggers = ScriptApp.getProjectTriggers();
+    for (let i = 0; i < triggers.length; i++) {
+      if (triggers[i].getHandlerFunction() === 'runNightlyRetentionRecompute') {
+        out.trigger.installed = true;
+      }
+    }
+  } catch (e) {
+    out.warnings.push('Tidak bisa membaca daftar trigger: ' + e);
+  }
+  if (!out.trigger.installed) {
+    out.warnings.push('Trigger malam TIDAK terpasang: sheet Sessions & downgrade retensi tidak berjalan. Buka editor Apps Script lalu jalankan installNightlyTrigger().');
+  }
+  if (out.lastNightlyRun === '(belum pernah)') {
+    out.warnings.push('Batch malam belum pernah tercatat berjalan.');
+  }
+
+  const sheetNames = ['Santri', 'Master_Hafalan', 'Murojaah', 'Riwayat_Tes', 'Notifikasi', 'Sessions', 'Cache_Ayat'];
+  sheetNames.forEach(function (name) {
+    try {
+      out.sheets[name] = getSheet(name).getLastRow();
+    } catch (e) {
+      out.sheets[name] = -1;
+    }
+  });
+
+  return out;
 }
 
 // ============================================================
