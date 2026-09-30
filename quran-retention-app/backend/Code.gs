@@ -280,13 +280,17 @@ function busyResponse() {
  * @param {function(): object} work
  * @returns {object} hasil kerja, atau busyResponse() bila lock gagal didapat
  */
-function withLock(work) {
+function withLock(work, options) {
   const lock = LockService.getScriptLock();
   if (!acquireLock(lock)) return busyResponse();
   try {
     return work();
   } finally {
     try { SpreadsheetApp.flush(); } catch (flushErr) { Logger.log('flush gagal: ' + flushErr); }
+    // Setiap penulisan menaikkan versi data -> cache dashboard tidak menyajikan
+    // angka lama tepat setelah user menyimpan (cache tetap efektif untuk
+    // pembacaan berulang). Penulisan cache ayat boleh melewati ini.
+    if (!options || options.bumpDash !== false) bumpDashVersion_();
     lock.releaseLock();
   }
 }
@@ -294,6 +298,102 @@ function withLock(work) {
 // ============================================================
 // HELPER GET SPREADSHEET
 // ============================================================
+
+// Cache lintas-request (CacheService). Sebelumnya proyek ini TIDAK memakai
+// CacheService sama sekali, sehingga setiap request harus membaca sheet dari nol
+// — termasuk validasi sesi di SETIAP request. Cache ini yang memutus biaya tetap
+// per-request tersebut.
+function getCache_() {
+  try { return CacheService.getScriptCache(); } catch (e) { return null; }
+}
+
+/**
+ * Versi data dashboard. Dinaikkan setiap ada penulisan sehingga dashboard yang
+ * dibuka tepat setelah menyimpan selalu segar, sementara pembacaan berulang
+ * dalam rentang singkat dilayani cache (bukan hitung ulang).
+ */
+function dashVersion_() {
+  const c = getCache_();
+  if (!c) return '0';
+  try { return c.get('dashgen') || '0'; } catch (e) { return '0'; }
+}
+
+function bumpDashVersion_() {
+  const c = getCache_();
+  if (!c) return;
+  try { c.put('dashgen', String(Date.now()), 21600); } catch (e) { /* diabaikan */ }
+}
+
+/** TTL (detik) untuk cache payload dashboard. Pendek: cukup meredam trafik berulang. */
+const DASH_CACHE_TTL_SEC = 30;
+const SANTRI_CACHE_TTL_SEC = 20;
+
+function dashCacheKey_(scope, id) {
+  return 'dash:' + scope + ':' + id + ':' + dashVersion_() + ':' + appTodayStr();
+}
+
+function dashCacheGet_(key) {
+  const c = getCache_();
+  if (!c) return null;
+  try {
+    const raw = c.get(key);
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) { return null; }
+}
+
+function dashCachePut_(key, value, ttlSec) {
+  const c = getCache_();
+  if (!c) return;
+  try { c.put(key, JSON.stringify(value), ttlSec || DASH_CACHE_TTL_SEC); } catch (e) { /* payload bisa terlalu besar -> diabaikan */ }
+}
+
+/**
+ * Baca satu sheet sebagai array of array dengan jumlah kolom yang dibatasi
+ * (tanpa baris pertama/header). Menggantikan getDataRange().getValues() yang
+ * selalu membaca seluruh grid termasuk kolom kosong di kanan.
+ */
+function readSheet_(sheetName, numColumns) {
+  const sheet = getSheet(sheetName);
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return [];
+  return sheet.getRange(2, 1, lastRow - 1, numColumns).getValues();
+}
+
+/**
+ * Indeks Master_Hafalan dikelompokkan per ID santri, dibangun SEKALI per request.
+ *
+ * Sebelum perbaikan ini, dashboard ustaz memindai seluruh Master_Hafalan untuk
+ * SETIAP santri (dan sekali lagi untuk menghitung progres target) sehingga
+ * kompleksitasnya O(santri x baris). Dengan indeks ini menjadi O(baris) sekali.
+ */
+function buildMasterIndex_() {
+  const rows = readSheet_('Master_Hafalan', 12);
+  const bySantri = {};
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    const idSantri = String(row[1] || '');
+    if (!idSantri) continue;
+    const unit = {
+      idMaster: String(row[0]),
+      idSantri: idSantri,
+      surah: String(row[2]),
+      ayatMulai: Number(row[3]) || 0,
+      ayatAkhir: Number(row[4]) || 0,
+      tglMulai: row[5],
+      status: String(row[6] || ''),
+      retentionStatus: String(row[7] || 'Hijau'),
+      nextReview: toDateStr(row[8]),
+      interval: Number(row[9]) || 1,
+      consecutiveLupa: Number(row[10]) || 0,
+      consecutiveLancar: Number(row[11]) || 0
+    };
+    if (!bySantri[idSantri]) bySantri[idSantri] = [];
+    bySantri[idSantri].push(unit);
+  }
+  return bySantri;
+}
+
+
 
 // Cache per-eksekusi. SpreadsheetApp.openById() dan getSheetByName() adalah
 // round-trip mahal; sebelumnya dipanggil berulang (6+ kali per request)
@@ -442,13 +542,13 @@ function loginUser(username, password) {
     return { success: false, code: 'E_VALIDATION', message: 'Username dan password wajib diisi' };
   }
 
+  const data = readSheet_('Users', 6);
   const sheet = getSheet('Users');
-  const data = sheet.getDataRange().getValues();
   if (data.length <= 1) {
     return { success: false, code: 'E_VALIDATION', message: 'Database pengguna kosong. Jalankan setupInitialDatabase() dari editor Apps Script.' };
   }
 
-  for (let i = 1; i < data.length; i++) {
+  for (let i = 0; i < data.length; i++) {
     // Kolom: ID(0), Username(1), Password_Hash(2), Role(3), Nama(4), ID_Terkait(5)
     if (String(data[i][1]).toLowerCase() === String(username).toLowerCase() && verifyPassword(password, data[i][2])) {
       const userId = String(data[i][0]);
@@ -490,6 +590,17 @@ function saveSession(userId, role, idTerkait, nama) {
     const expiry = new Date(Date.now() + expiryHours * 60 * 60 * 1000);
     // Expiry disimpan sebagai ISO timestamp agar sel tidak diubah menjadi tipe Date.
     sheet.appendRow([token, userId, role, expiry.toISOString(), idTerkait || '', nama || '']);
+
+    // Hangatkan cache agar request pertama setelah login tidak perlu membaca sheet.
+    const cache = getCache_();
+    if (cache) {
+      try {
+        cache.put('sess:' + token, JSON.stringify({
+          userId: userId, role: role, idTerkait: idTerkait || '', nama: nama || '', _exp: expiry.toISOString()
+        }), Math.min(21600, Math.max(60, expiryHours * 3600 - 60)));
+      } catch (e) { /* diabaikan */ }
+    }
+    bumpDashVersion_(); // sesi baru -> dashboard boleh dihitung ulang
     return token;
   } finally {
     // Pastikan tulisan benar-benar ter-commit sebelum lock dilepas, agar
@@ -500,12 +611,29 @@ function saveSession(userId, role, idTerkait, nama) {
 }
 
 function validateSession(token) {
+  // Jalur cepat: sesi yang sudah tervalidasi dilayani cache (tanpa membaca sheet).
+  // Ini memutus biaya tetap per-request — dulu SETIAP request (termasuk 3-4
+  // panggilan ayat per kartu flashcard) membaca seluruh sheet Sessions.
+  const cache = getCache_();
+  const cacheKey = 'sess:' + token;
+  if (cache) {
+    try {
+      const cached = cache.get(cacheKey);
+      if (cached) {
+        const sess = JSON.parse(cached);
+        if (sess && sess._exp && new Date(sess._exp).getTime() > Date.now()) return sess;
+        cache.remove(cacheKey); // kedaluwarsa -> buang
+      }
+    } catch (e) { /* cache rusak -> jatuh ke pembacaan sheet */ }
+  }
+
   const sheet = getSheet('Sessions');
-  const data = sheet.getDataRange().getValues();
+  const data = readSheet_('Sessions', 6);
   const now = new Date();
 
-  for (let i = 1; i < data.length; i++) {
+  for (let i = 0; i < data.length; i++) {
     // Kolom: Token(0), ID_User(1), Role(2), Expiry(3), ID_Terkait(4), Nama(5)
+    // (readSheet_ tanpa header -> index 0 = baris data pertama)
     if (data[i][0] === token) {
       const expiryDate = new Date(data[i][3]);
       if (expiryDate < now) {
@@ -528,12 +656,21 @@ function validateSession(token) {
         }
         return null; // Expired
       }
-      return {
+      const session = {
         userId: String(data[i][1]),
         role: String(data[i][2]),
         idTerkait: String(data[i][4] || ''),
-        nama: String(data[i][5] || '')
+        nama: String(data[i][5] || ''),
+        _exp: data[i][3]
       };
+      // Simpan ke cache sampai sedikit sebelum masa berlakunya habis.
+      if (cache) {
+        try {
+          const sisaDetik = Math.max(60, Math.floor((expiryDate.getTime() - now.getTime()) / 1000) - 60);
+          cache.put(cacheKey, JSON.stringify(session), Math.min(sisaDetik, 21600));
+        } catch (e) { /* diabaikan */ }
+      }
+      return session;
     }
   }
   return null;
@@ -546,11 +683,17 @@ function logoutUser(token) {
   }
 
   try {
+    const cache = getCache_();
+    if (cache) { try { cache.remove('sess:' + token); } catch (e) { /* diabaikan */ } }
+
     const sheet = getSheet('Sessions');
-    const data = sheet.getDataRange().getValues();
-    for (let i = 1; i < data.length; i++) {
+    const data = readSheet_('Sessions', 6);
+    for (let i = 0; i < data.length; i++) {
       if (data[i][0] === token) {
-        sheet.deleteRow(i + 1);
+        // Tandai kedaluwarsa (bukan deleteRow): deleteRow menggeser seluruh baris
+        // di bawahnya — mahal saat sheet besar. Pembersihan fisik dilakukan batch
+        // malam / lazy cleanup di validateSession.
+        sheet.getRange(i + 2, 4).setValue(new Date(0).toISOString());
         return { success: true, message: 'Logout berhasil' };
       }
     }
@@ -685,9 +828,9 @@ function calculateNextRetentionState(currentStatus, currentInterval, consecutive
  */
 function updateMasterHafalanCache(masterId, quality, config) {
   const sheet = getSheet('Master_Hafalan');
-  const data = sheet.getDataRange().getValues();
+  const data = readSheet_('Master_Hafalan', 12);
 
-  for (let i = 1; i < data.length; i++) {
+  for (let i = 0; i < data.length; i++) {
     if (String(data[i][0]) === String(masterId)) {
       const currentStatus = data[i][7] || 'Hijau';          // Retention_Status_Cache (kolom 8)
       const currentInterval = data[i][9] || 1;              // Current_Interval_Hari (kolom 10)
@@ -698,7 +841,7 @@ function updateMasterHafalanCache(masterId, quality, config) {
 
       // Update kolom 8-12 Master_Hafalan (Retention_Status_Cache .. Consecutive_Lancar).
       // Baris lama tanpa kolom ke-12 tetap aman: Sheets hanya menulis sel di kanan.
-      sheet.getRange(i + 1, 8, 1, 5).setValues([[
+      sheet.getRange(i + 2, 8, 1, 5).setValues([[
         result.newStatus,
         result.nextReviewStr,
         result.newInterval,
@@ -718,7 +861,7 @@ function updateMasterHafalanCache(masterId, quality, config) {
 
 function awardXPAndQualifyingActivity(santriId, baseXP, bonusXP, isQualifying, recoveryAchieved, config) {
   const sheet = getSheet('Gamifikasi');
-  const data = sheet.getDataRange().getValues();
+  const data = readSheet_('Gamifikasi', 6);
   const today = appTodayStr();
 
   let totalXPToAdd = baseXP + (bonusXP || 0);
@@ -732,9 +875,9 @@ function awardXPAndQualifyingActivity(santriId, baseXP, bonusXP, isQualifying, r
   let longestStreak = 0;
   let lastQualifyingDate = '';
 
-  for (let i = 1; i < data.length; i++) {
+  for (let i = 0; i < data.length; i++) {
     if (String(data[i][0]) === String(santriId)) {
-      rowIndex = i + 1;
+      rowIndex = i + 2;
       currentXP = Number(data[i][1]) || 0;
       currentStreak = Number(data[i][3]) || 0;
       longestStreak = Number(data[i][4]) || 0;
@@ -797,10 +940,10 @@ function awardXPAndQualifyingActivity(santriId, baseXP, bonusXP, isQualifying, r
 
 function checkMilestoneBadges(santriId, xp, level, streak) {
   const badgeSheet = getSheet('Badge');
-  const badgeData = badgeSheet.getDataRange().getValues();
+  const badgeData = readSheet_('Badge', 4);
   const existingBadges = new Set();
 
-  for (let i = 1; i < badgeData.length; i++) {
+  for (let i = 0; i < badgeData.length; i++) {
     if (String(badgeData[i][1]) === String(santriId)) {
       existingBadges.add(String(badgeData[i][2]));
     }
@@ -830,29 +973,27 @@ function checkMilestoneBadges(santriId, xp, level, streak) {
  * Menghasilkan misi harian (Sabaq, Sabqi, Manzil) berdasarkan cache retention
  */
 function generateDailyMissions(santriId, config) {
-  const masterSheet = getSheet('Master_Hafalan');
-  const masterData = masterSheet.getDataRange().getValues();
   const todayStr = appTodayStr();
   const ambangSabqi = Number(config.AMBANG_SABQI_HARI || 30);
 
-  const units = [];
-  for (let i = 1; i < masterData.length; i++) {
-    if (String(masterData[i][1]) === String(santriId)) {
-      units.push({
-        idMaster: String(masterData[i][0]),
-        surah: String(masterData[i][2]),
-        ayatMulai: Number(masterData[i][3]),
-        ayatAkhir: Number(masterData[i][4]),
-        tglMulai: masterData[i][5],
-        diffDays: diffDaysFrom(masterData[i][5]),
-        retentionStatus: masterData[i][7] || 'Hijau',
-        nextReview: toDateStr(masterData[i][8]) || todayStr,
-        interval: Number(masterData[i][9]) || 1,
-        consecutiveLupa: Number(masterData[i][10]) || 0,
-        consecutiveLancar: Number(masterData[i][11]) || 0
-      });
-    }
-  }
+  // Unit diambil dari indeks Master_Hafalan yang sudah dikelompokkan per santri
+  // (satu kali baca untuk seluruh request, bukan satu kali per santri).
+  const indexed = buildMasterIndex_()[santriId] || [];
+  const units = indexed.map(function (u) {
+    return {
+      idMaster: u.idMaster,
+      surah: u.surah,
+      ayatMulai: u.ayatMulai,
+      ayatAkhir: u.ayatAkhir,
+      tglMulai: u.tglMulai,
+      diffDays: diffDaysFrom(u.tglMulai),
+      retentionStatus: u.retentionStatus || 'Hijau',
+      nextReview: u.nextReview || todayStr,
+      interval: u.interval || 1,
+      consecutiveLupa: u.consecutiveLupa || 0,
+      consecutiveLancar: u.consecutiveLancar || 0
+    };
+  });
 
   // Prioritas: Merah > Kuning > overdue > lebih tua.
   const priorityOf = (u) => {
@@ -890,11 +1031,10 @@ function generateDailyMissions(santriId, config) {
 
   // Konfirmasi hari ini dibaca dari sheet Murojaah.
   // Kunci = Jenis_Misi + Detail unit ("Surah (1-20)") => selesai PER UNIT.
-  const murojaahSheet = getSheet('Murojaah');
-  const murojaahData = murojaahSheet.getDataRange().getValues();
+  const murojaahData = readSheet_('Murojaah', 7);
   const completedKeys = new Set();
 
-  for (let i = 1; i < murojaahData.length; i++) {
+  for (let i = 0; i < murojaahData.length; i++) {
     const tgl = toDateStr(murojaahData[i][1]);
     if (String(murojaahData[i][2]) === String(santriId) && tgl === todayStr) {
       completedKeys.add(String(murojaahData[i][3] || '') + '|' + String(murojaahData[i][4] || '').trim());
@@ -936,25 +1076,64 @@ function ustazGetDashboard(session) {
     return { success: false, code: 'E_FORBIDDEN', message: 'Akses khusus Ustaz' };
   }
 
-  const santriSheet = getSheet('Santri');
-  const masterSheet = getSheet('Master_Hafalan');
-  const targetSheet = getSheet('Target');
-  const gamifikasiSheet = getSheet('Gamifikasi');
+  // Cache pendek (30 dtk) + versi data: pembacaan berulang tidak dihitung ulang,
+  // tetapi setiap penulisan menaikkan versi sehingga data selalu segar.
+  const cacheKey = dashCacheKey_('ustaz', session.userId);
+  const cached = dashCacheGet_(cacheKey);
+  if (cached) return cached;
 
-  const santriData = santriSheet ? santriSheet.getDataRange().getValues() : [];
-  const masterData = masterSheet ? masterSheet.getDataRange().getValues() : [];
-  const targetData = targetSheet ? targetSheet.getDataRange().getValues() : [];
-  const gamifikasiData = gamifikasiSheet ? gamifikasiSheet.getDataRange().getValues() : [];
+  // Setiap sumber data dibaca SEKALI dengan jumlah kolom minimal (dulu: 4 kali
+  // getDataRange() penuh + pemindaian Master_Hafalan per santri).
+  const santriRows = readSheet_('Santri', 4);
+  const masterIndex = buildMasterIndex_();
+  const targetRows = readSheet_('Target', 6);
+  const gamifRows = readSheet_('Gamifikasi', 6);
+
+  const todayStr = appTodayStr();
+  const currentMonthStr = todayStr.slice(0, 7);
+
+  // Indeks gamifikasi & target bulan berjalan (O(baris) sekali).
+  const gamifBySantri = {};
+  for (let i = 0; i < gamifRows.length; i++) {
+    const r = gamifRows[i];
+    const id = String(r[0] || '');
+    if (!id) continue;
+    gamifBySantri[id] = {
+      xp: Number(r[1]) || 0,
+      level: Number(r[2]) || 1,
+      currentStreak: Number(r[3]) || 0,
+      longestStreak: Number(r[4]) || 0
+    };
+  }
+
+  const targetBySantri = {};
+  for (let i = 0; i < targetRows.length; i++) {
+    const r = targetRows[i];
+    const id = String(r[2] || '');
+    if (!id) continue;
+    const bulan = String(r[1] || '');
+    if (!bulan.startsWith(currentMonthStr)) continue;
+    if (targetBySantri[id]) continue; // target pertama bulan ini (perilaku lama)
+    targetBySantri[id] = {
+      idTarget: String(r[0]),
+      bulan: bulan,
+      surah: String(r[3]),
+      ayatMulai: Number(r[4]) || 0,
+      ayatAkhir: Number(r[5]) || 0
+    };
+  }
+
+  // Pencocokan nama surah yang toleran tanda baca/apostrof (dipakai progres target).
+  const norm = function (v) { return String(v || '').replace(/[^a-z0-9]/gi, '').toLowerCase(); };
 
   const santriList = [];
-  const todayStr = appTodayStr();
 
-  for (let i = 1; i < santriData.length; i++) {
-    // Filter santri sesuai ID_Ustaz atau jika ID_Ustaz kosong / admin
-    const idSantri = String(santriData[i][0]);
-    const namaSantri = String(santriData[i][1]);
-    const idUstaz = String(santriData[i][2]);
-    const statusSantri = String(santriData[i][3]);
+  for (let i = 0; i < santriRows.length; i++) {
+    const idSantri = String(santriRows[i][0] || '');
+    if (!idSantri) continue;
+    const namaSantri = String(santriRows[i][1] || '');
+    const idUstaz = String(santriRows[i][2] || '');
+    const statusSantri = String(santriRows[i][3] || '');
 
     // Filter kelompok: hanya santri bimbingan ustaz ini (PRD Section 16).
     // Santri dengan ID_Ustaz kosong tetap ditampilkan agar data hasil migrasi
@@ -962,87 +1141,54 @@ function ustazGetDashboard(session) {
     const isMySantri = !idUstaz || idUstaz === session.userId || (!!session.idTerkait && idUstaz === session.idTerkait);
     if (!isMySantri) continue;
 
-    // Hitung status retensi dari Master_Hafalan cache
+    const units = masterIndex[idSantri] || [];
     let countHijau = 0;
     let countKuning = 0;
     let countMerah = 0;
     let overdueCount = 0;
-    let totalHafalan = 0;
-    // Hafalan terakhir (umur paling muda) -> dipakai usulan target 1-klik.
     let lastUnit = null;
     let lastUnitAge = Infinity;
 
-    for (let j = 1; j < masterData.length; j++) {
-      if (String(masterData[j][1]) === idSantri) {
-        totalHafalan++;
-        const retStatus = masterData[j][7] || 'Hijau';
-        const nextReview = toDateStr(masterData[j][8]);
+    for (let j = 0; j < units.length; j++) {
+      const u = units[j];
+      if (u.retentionStatus === 'Hijau') countHijau++;
+      else if (u.retentionStatus === 'Kuning') countKuning++;
+      else if (u.retentionStatus === 'Merah') countMerah++;
 
-        if (retStatus === 'Hijau') countHijau++;
-        else if (retStatus === 'Kuning') countKuning++;
-        else if (retStatus === 'Merah') countMerah++;
+      if (u.nextReview && u.nextReview < todayStr) overdueCount++;
 
-        if (nextReview && nextReview < todayStr) {
-          overdueCount++;
-        }
-
-        const age = diffDaysFrom(masterData[j][5]);
-        if (age < lastUnitAge) {
-          lastUnitAge = age;
-          lastUnit = {
-            surah: String(masterData[j][2]),
-            ayatMulai: Number(masterData[j][3]),
-            ayatAkhir: Number(masterData[j][4]),
-            retentionStatus: retStatus
-          };
-        }
-      }
-    }
-
-    // Gamifikasi data
-    let streak = 0;
-    let xp = 0;
-    let level = 1;
-    let longestStreak = 0;
-    for (let k = 1; k < gamifikasiData.length; k++) {
-      if (String(gamifikasiData[k][0]) === idSantri) {
-        xp = Number(gamifikasiData[k][1]) || 0;
-        level = Number(gamifikasiData[k][2]) || 1;
-        streak = Number(gamifikasiData[k][3]) || 0;
-        longestStreak = Number(gamifikasiData[k][4]) || 0;
-        break;
-      }
-    }
-
-    // Target bulan ini
-    let currentTarget = null;
-    const currentMonthStr = appTodayStr().slice(0, 7); // YYYY-MM
-    for (let m = 1; m < targetData.length; m++) {
-      if (String(targetData[m][2]) === idSantri && String(targetData[m][1]).startsWith(currentMonthStr)) {
-        currentTarget = {
-          idTarget: targetData[m][0],
-          bulan: String(targetData[m][1]),
-          surah: targetData[m][3],
-          ayatMulai: targetData[m][4],
-          ayatAkhir: targetData[m][5]
+      const age = diffDaysFrom(u.tglMulai);
+      if (age < lastUnitAge) {
+        lastUnitAge = age;
+        lastUnit = {
+          surah: u.surah,
+          ayatMulai: u.ayatMulai,
+          ayatAkhir: u.ayatAkhir,
+          retentionStatus: u.retentionStatus
         };
-        break;
       }
     }
+
+    const totalHafalan = units.length;
+    const gamif = gamifBySantri[idSantri] || { xp: 0, level: 1, currentStreak: 0, longestStreak: 0 };
+    const xp = gamif.xp;
+    const level = gamif.level;
+    const streak = gamif.currentStreak;
+    const longestStreak = gamif.longestStreak;
+
+    const currentTarget = targetBySantri[idSantri] || null;
 
     // Progres capaian target bulan ini (untuk Notifikasi Target Ustaz).
     let targetProgress = null;
     if (currentTarget) {
-      const norm = function (v) { return String(v || '').replace(/[^a-z0-9]/gi, '').toLowerCase(); };
       const tMulai = Number(currentTarget.ayatMulai) || 0;
       const tAkhir = Number(currentTarget.ayatAkhir) || 0;
       const tTotal = Math.max(0, tAkhir - tMulai + 1);
       const covered = {};
-      for (let n = 1; n < masterData.length; n++) {
-        if (String(masterData[n][1]) !== idSantri) continue;
-        if (norm(masterData[n][2]) !== norm(currentTarget.surah)) continue;
-        const a = Math.max(tMulai, Number(masterData[n][3]) || 0);
-        const b = Math.min(tAkhir, Number(masterData[n][4]) || 0);
+      for (let n = 0; n < units.length; n++) {
+        if (norm(units[n].surah) !== norm(currentTarget.surah)) continue;
+        const a = Math.max(tMulai, Number(units[n].ayatMulai) || 0);
+        const b = Math.min(tAkhir, Number(units[n].ayatAkhir) || 0);
         for (let x = a; x <= b; x++) covered[x] = true;
       }
       const doneCount = Object.keys(covered).length;
@@ -1055,8 +1201,8 @@ function ustazGetDashboard(session) {
 
     // Auto-flag detection
     const flags = [];
-    if (countMerah > 0) flags.push(`Kritis: ${countMerah} unit hafalan status Merah`);
-    if (overdueCount >= 2) flags.push(`Overdue: ${overdueCount} jadwal review terlewat`);
+    if (countMerah > 0) flags.push('Kritis: ' + countMerah + ' unit hafalan status Merah');
+    if (overdueCount >= 2) flags.push('Overdue: ' + overdueCount + ' jadwal review terlewat');
     if (streak === 0 && totalHafalan > 0) flags.push('Streak terputus');
 
     santriList.push({
@@ -1086,18 +1232,21 @@ function ustazGetDashboard(session) {
     });
   }
 
-  return {
+  const result = {
     success: true,
     ustazName: session.nama,
     santriList: santriList,
     stats: {
       totalSantri: santriList.length,
-      totalMerah: santriList.reduce((acc, s) => acc + s.retention.merah, 0),
-      totalKuning: santriList.reduce((acc, s) => acc + s.retention.kuning, 0),
-      totalHijau: santriList.reduce((acc, s) => acc + s.retention.hijau, 0),
-      flaggedSantri: santriList.filter(s => s.flags.length > 0).length
+      totalMerah: santriList.reduce(function (acc, s) { return acc + s.retention.merah; }, 0),
+      totalKuning: santriList.reduce(function (acc, s) { return acc + s.retention.kuning; }, 0),
+      totalHijau: santriList.reduce(function (acc, s) { return acc + s.retention.hijau; }, 0),
+      flaggedSantri: santriList.filter(function (s) { return s.flags.length > 0; }).length
     }
   };
+
+  dashCachePut_(cacheKey, result, DASH_CACHE_TTL_SEC);
+  return result;
 }
 
 // Ustaz Add Setoran
@@ -1139,17 +1288,17 @@ function ustazAddSetoran(session, payload) {
     ]);
 
     // 2. Tambah / Update Master_Hafalan
-    const masterData = masterSheet.getDataRange().getValues();
+    const masterData = readSheet_('Master_Hafalan', 12); // kolom minimal; index 0 = baris sheet ke-2
     let existingIndex = -1;
 
-    for (let i = 1; i < masterData.length; i++) {
+    for (let i = 0; i < masterData.length; i++) {
       if (
         String(masterData[i][1]) === String(payload.idSantri) &&
         String(masterData[i][2]).toLowerCase() === String(payload.surah).toLowerCase() &&
         Number(masterData[i][3]) === Number(payload.ayatMulai) &&
         Number(masterData[i][4]) === Number(payload.ayatAkhir)
       ) {
-        existingIndex = i + 1;
+        existingIndex = i + 2; // +2: readSheet_ tanpa header, getRange 1-based
         break;
       }
     }
@@ -1160,7 +1309,7 @@ function ustazAddSetoran(session, payload) {
 
     if (existingIndex > 0) {
       // Update cache unit yang sudah ada memakai rumus SM-2-lite.
-      const row = masterData[existingIndex - 1];
+      const row = masterData[existingIndex - 2];
       const state = calculateNextRetentionState(
         row[7] || 'Hijau',
         row[9] || 1,
@@ -1243,13 +1392,13 @@ function ustazSaveTarget(session, payload) {
 
   try {
     const targetSheet = getSheet('Target');
-    const data = targetSheet.getDataRange().getValues();
+    const data = readSheet_('Target', 6);
     const bulan = payload.bulan || appTodayStr().slice(0, 7);
 
     let updated = false;
-    for (let i = 1; i < data.length; i++) {
+    for (let i = 0; i < data.length; i++) {
       if (String(data[i][2]) === String(payload.idSantri) && String(data[i][1]) === bulan) {
-        targetSheet.getRange(i + 1, 4, 1, 3).setValues([[
+        targetSheet.getRange(i + 2, 4, 1, 3).setValues([[
           payload.surah,
           Number(payload.ayatMulai),
           Number(payload.ayatAkhir)
@@ -1339,8 +1488,7 @@ function ustazSendBroadcast(session, payload) {
 
   try {
     const notifSheet = getSheet('Notifikasi');
-    const santriSheet = getSheet('Santri');
-    const santriData = santriSheet.getDataRange().getValues();
+    const santriData = readSheet_('Santri', 4);
     const todayStr = appTodayStr();
 
     // Batch write: susun semua baris dulu, lalu tulis sekali (setValues).
@@ -1348,7 +1496,7 @@ function ustazSendBroadcast(session, payload) {
     // timeout ketika jumlah santri banyak.
     const rows = [];
     let skipped = 0;
-    for (let i = 1; i < santriData.length; i++) {
+    for (let i = 0; i < santriData.length; i++) {
       const idSantri = String(santriData[i][0]);
       if (!idSantri) continue;
 
@@ -1394,8 +1542,11 @@ function ustazSendBroadcast(session, payload) {
 function isSantriInUstazGroup(session, santriId) {
   const santriSheet = getSpreadsheet().getSheetByName('Santri');
   if (!santriSheet) return false;
-  const data = santriSheet.getDataRange().getValues();
-  for (let i = 1; i < data.length; i++) {
+  const lastRow = santriSheet.getLastRow();
+  if (lastRow < 2) return false;
+  // 4 kolom saja (bukan seluruh grid) — fungsi ini dipanggil di setiap aksi tulis.
+  const data = santriSheet.getRange(2, 1, lastRow - 1, 4).getValues();
+  for (let i = 0; i < data.length; i++) {
     if (String(data[i][0]) === String(santriId)) {
       const idUstaz = String(data[i][2] || '');
       return !idUstaz || idUstaz === session.userId || (!!session.idTerkait && idUstaz === session.idTerkait);
@@ -1406,7 +1557,7 @@ function isSantriInUstazGroup(session, santriId) {
 
 // Ustaz Get Santri Detail
 function ustazGetSantriDetail(session, santriId) {
-  if (!santriId) return { success: false, message: 'ID santri wajib dikirim' };
+  if (!santriId) return { success: false, code: 'E_VALIDATION', message: 'ID santri wajib dikirim' };
 
   // Otorisasi (PRD Section 16): ustaz hanya untuk santri kelompoknya,
   // santri hanya untuk datanya sendiri.
@@ -1415,39 +1566,31 @@ function ustazGetSantriDetail(session, santriId) {
     return { success: false, code: 'E_FORBIDDEN', message: 'Akses ditolak' };
   }
   if (session.role === 'ustaz' && !isSantriInUstazGroup(session, santriId)) {
-    return { success: false, message: 'Santri ini bukan bagian dari kelompok bimbingan Anda' };
+    return { success: false, code: 'E_FORBIDDEN', message: 'Santri ini bukan bagian dari kelompok bimbingan Anda' };
   }
 
-  const masterSheet = getSheet('Master_Hafalan');
-  const hafalanSheet = getSheet('Hafalan');
-  const tesSheet = getSheet('Riwayat_Tes');
-  const murojaahSheet = getSheet('Murojaah');
+  // Kolom minimal + indeks Master_Hafalan (satu kali baca per request).
+  // Hanya setoran yang dibutuhkan di sini; Riwayat_Tes & Murojaah tidak dibaca
+  // agar endpoint ini tidak memuat I/O yang tak terpakai.
+  const hafalanData = readSheet_('Hafalan', 10);
 
-  const masterData = masterSheet.getDataRange().getValues();
-  const hafalanData = hafalanSheet.getDataRange().getValues();
-  const tesData = tesSheet.getDataRange().getValues();
-  const murojaahData = murojaahSheet.getDataRange().getValues();
-
-  const units = [];
-  for (let i = 1; i < masterData.length; i++) {
-    if (String(masterData[i][1]) === String(santriId)) {
-      units.push({
-        idMaster: masterData[i][0],
-        surah: masterData[i][2],
-        ayatMulai: masterData[i][3],
-        ayatAkhir: masterData[i][4],
-        tglMulai: masterData[i][5],
-        status: masterData[i][6],
-        retentionStatus: masterData[i][7] || 'Hijau',
-        nextReview: masterData[i][8],
-        interval: masterData[i][9],
-        consecutiveLupa: masterData[i][10]
-      });
-    }
-  }
+  const units = (buildMasterIndex_()[santriId] || []).map(function (u) {
+    return {
+      idMaster: u.idMaster,
+      surah: u.surah,
+      ayatMulai: u.ayatMulai,
+      ayatAkhir: u.ayatAkhir,
+      tglMulai: u.tglMulai,
+      status: u.status,
+      retentionStatus: u.retentionStatus || 'Hijau',
+      nextReview: u.nextReview,
+      interval: u.interval,
+      consecutiveLupa: u.consecutiveLupa
+    };
+  });
 
   const setoranHistory = [];
-  for (let i = 1; i < hafalanData.length; i++) {
+  for (let i = 0; i < hafalanData.length; i++) {
     if (String(hafalanData[i][2]) === String(santriId)) {
       setoranHistory.push({
         idHafalan: hafalanData[i][0],
@@ -1473,76 +1616,71 @@ function ustazGetSantriDetail(session, santriId) {
 function santriGetDashboard(session) {
   const santriId = session.role === 'santri' ? session.userId : session.idTerkait;
   if (!santriId) {
-    return { success: false, message: 'Akun ini tidak terhubung dengan data santri (ID_Terkait kosong)' };
+    return { success: false, code: 'E_VALIDATION', message: 'Akun ini tidak terhubung dengan data santri (ID_Terkait kosong)' };
   }
+
+  // Cache pendek + versi data: flashcard/aksi tulis menaikkan versi, sehingga
+  // pemuatan berulang tidak dihitung ulang dari nol.
+  const cacheKey = dashCacheKey_('santri', santriId);
+  const cached = dashCacheGet_(cacheKey);
+  if (cached) return cached;
+
   const config = getConfigMap();
 
-  // 1. Daily Missions
+  // 1. Daily Missions (memakai indeks Master_Hafalan, sekali baca)
   const missions = generateDailyMissions(santriId, config);
 
   // 2. Gamifikasi
-  const gamifikasiSheet = getSheet('Gamifikasi');
-  const gamifData = gamifikasiSheet.getDataRange().getValues();
   let gamifikasi = { xp: 0, level: 1, currentStreak: 0, longestStreak: 0, lastQualifyingDate: '' };
-
-  for (let i = 1; i < gamifData.length; i++) {
-    if (String(gamifData[i][0]) === String(santriId)) {
+  const gamifRows = readSheet_('Gamifikasi', 6);
+  for (let i = 0; i < gamifRows.length; i++) {
+    if (String(gamifRows[i][0]) === String(santriId)) {
       gamifikasi = {
-        xp: Number(gamifData[i][1]) || 0,
-        level: Number(gamifData[i][2]) || 1,
-        currentStreak: Number(gamifData[i][3]) || 0,
-        longestStreak: Number(gamifData[i][4]) || 0,
-        lastQualifyingDate: gamifData[i][5] || ''
+        xp: Number(gamifRows[i][1]) || 0,
+        level: Number(gamifRows[i][2]) || 1,
+        currentStreak: Number(gamifRows[i][3]) || 0,
+        longestStreak: Number(gamifRows[i][4]) || 0,
+        lastQualifyingDate: gamifRows[i][5] || ''
       };
       break;
     }
   }
 
   // 3. Badges
-  const badgeSheet = getSheet('Badge');
-  const badgeData = badgeSheet.getDataRange().getValues();
+  const badgeRows = readSheet_('Badge', 4);
   const badges = [];
-  for (let i = 1; i < badgeData.length; i++) {
-    if (String(badgeData[i][1]) === String(santriId)) {
-      badges.push({
-        idBadge: badgeData[i][0],
-        nama: badgeData[i][2],
-        tgl: badgeData[i][3]
-      });
+  for (let i = 0; i < badgeRows.length; i++) {
+    if (String(badgeRows[i][1]) === String(santriId)) {
+      badges.push({ idBadge: badgeRows[i][0], nama: badgeRows[i][2], tgl: badgeRows[i][3] });
     }
   }
 
   // 4. Notifications & Feedbacks
-  const notifSheet = getSheet('Notifikasi');
-  const notifData = notifSheet.getDataRange().getValues();
+  const notifRows = readSheet_('Notifikasi', 6);
   const notifications = [];
-  for (let i = 1; i < notifData.length; i++) {
-    if (String(notifData[i][1]) === String(santriId)) {
+  for (let i = 0; i < notifRows.length; i++) {
+    if (String(notifRows[i][1]) === String(santriId)) {
       notifications.push({
-        idNotif: notifData[i][0],
-        tipe: notifData[i][2],
-        pesan: notifData[i][3],
-        tgl: notifData[i][4],
-        dibaca: notifData[i][5] === 'Sudah'
+        idNotif: notifRows[i][0],
+        tipe: notifRows[i][2],
+        pesan: notifRows[i][3],
+        tgl: notifRows[i][4],
+        dibaca: notifRows[i][5] === 'Sudah'
       });
     }
   }
 
-  // 5. Activity Heatmap (Last 30 Days)
-  const murojaahSheet = getSheet('Murojaah');
-  const murojaahData = murojaahSheet.getDataRange().getValues();
+  // 5. Activity Heatmap (30 hari terakhir) — dari log Murojaah.
+  const murojaahRows = readSheet_('Murojaah', 7);
   const activityMap = {};
-
-  for (let i = 1; i < murojaahData.length; i++) {
-    if (String(murojaahData[i][2]) === String(santriId)) {
-      const tgl = toDateStr(murojaahData[i][1]);
-      if (tgl) {
-        activityMap[tgl] = (activityMap[tgl] || 0) + 1;
-      }
+  for (let i = 0; i < murojaahRows.length; i++) {
+    if (String(murojaahRows[i][2]) === String(santriId)) {
+      const tgl = toDateStr(murojaahRows[i][1]);
+      if (tgl) activityMap[tgl] = (activityMap[tgl] || 0) + 1;
     }
   }
 
-  return {
+  const result = {
     success: true,
     nama: session.nama,
     santriId: santriId,
@@ -1552,6 +1690,9 @@ function santriGetDashboard(session) {
     notifications: notifications.slice(-10).reverse(),
     activityMap: activityMap
   };
+
+  dashCachePut_(cacheKey, result, SANTRI_CACHE_TTL_SEC);
+  return result;
 }
 
 // Santri Confirm Murojaah
@@ -1657,37 +1798,30 @@ function santriSubmitFlashcard(session, payload) {
 }
 
 function markNotificationRead(session, notifId) {
-  if (!notifId) return { success: false, message: 'ID notifikasi wajib dikirim' };
+  if (!notifId) return { success: false, code: 'E_VALIDATION', message: 'ID notifikasi wajib dikirim' };
 
-  const lock = LockService.getScriptLock();
-  if (!acquireLock(lock)) {
-    return busyResponse();
-  }
-
-  try {
+  return withLock(function () {
     const notifSheet = getSheet('Notifikasi');
-    const data = notifSheet.getDataRange().getValues();
+    const data = readSheet_('Notifikasi', 6);
 
-    for (let i = 1; i < data.length; i++) {
+    for (let i = 0; i < data.length; i++) {
       if (String(data[i][0]) === String(notifId)) {
         // Otorisasi: notifikasi hanya boleh ditandai oleh pemiliknya.
         const owner = String(data[i][1]);
         const isOwner = owner === String(session.userId) || (!!session.idTerkait && owner === String(session.idTerkait));
         if (!isOwner) {
-          return { success: false, message: 'Notifikasi ini bukan milik akun Anda' };
+          return { success: false, code: 'E_FORBIDDEN', message: 'Notifikasi ini bukan milik akun Anda' };
         }
-        notifSheet.getRange(i + 1, 6).setValue('Sudah');
+        notifSheet.getRange(i + 2, 6).setValue('Sudah');
         return { success: true };
       }
     }
-    return { success: false, message: 'Notifikasi tidak ditemukan' };
-  } finally {
-    try { SpreadsheetApp.flush(); } catch (flushErr) { Logger.log('flush gagal: ' + flushErr); }
-    lock.releaseLock();
-  }
+    return { success: false, code: 'E_VALIDATION', message: 'Notifikasi tidak ditemukan' };
+  });
 }
 
 // --- 3. ORTU DASHBOARD & SMART RANDOM TEST ---
+
 function ortuGetDashboard(session) {
   if (session.role !== 'ortu' && session.role !== 'admin') {
     return { success: false, code: 'E_FORBIDDEN', message: 'Akses khusus Orang Tua' };
@@ -1695,49 +1829,44 @@ function ortuGetDashboard(session) {
 
   const santriId = session.idTerkait;
   if (!santriId) {
-    return { success: false, message: 'Akun ini belum terhubung ke data santri (ID_Terkait kosong)' };
+    return { success: false, code: 'E_VALIDATION', message: 'Akun ini belum terhubung ke data santri (ID_Terkait kosong)' };
   }
 
-  const ss = getSpreadsheet();
-  const santriSheet = ss.getSheetByName('Santri');
-  const masterSheet = ss.getSheetByName('Master_Hafalan');
-  const gamifSheet = ss.getSheetByName('Gamifikasi');
-  const tesSheet = ss.getSheetByName('Riwayat_Tes');
+  const cacheKey = dashCacheKey_('ortu', session.userId + ':' + santriId);
+  const cached = dashCacheGet_(cacheKey);
+  if (cached) return cached;
 
+  // Nama ananda
   let santriName = 'Ananda';
-  if (santriSheet) {
-    const sData = santriSheet.getDataRange().getValues();
-    for (let i = 1; i < sData.length; i++) {
-      if (String(sData[i][0]) === String(santriId)) {
-        santriName = sData[i][1];
-        break;
-      }
+  const santriRows = readSheet_('Santri', 4);
+  for (let i = 0; i < santriRows.length; i++) {
+    if (String(santriRows[i][0]) === String(santriId)) {
+      santriName = String(santriRows[i][1] || 'Ananda');
+      break;
     }
   }
 
-  // Retention breakdown
-  const masterData = masterSheet ? masterSheet.getDataRange().getValues() : [];
+  // Retention breakdown + daftar unit (dari indeks: Master_Hafalan dibaca sekali)
+  const units = buildMasterIndex_()[santriId] || [];
   let countHijau = 0;
   let countKuning = 0;
   let countMerah = 0;
   const unitList = [];
 
-  for (let i = 1; i < masterData.length; i++) {
-    if (String(masterData[i][1]) === String(santriId)) {
-      const status = masterData[i][7] || 'Hijau';
-      if (status === 'Hijau') countHijau++;
-      else if (status === 'Kuning') countKuning++;
-      else if (status === 'Merah') countMerah++;
+  for (let i = 0; i < units.length; i++) {
+    const status = units[i].retentionStatus || 'Hijau';
+    if (status === 'Hijau') countHijau++;
+    else if (status === 'Kuning') countKuning++;
+    else if (status === 'Merah') countMerah++;
 
-      unitList.push({
-        idMaster: masterData[i][0],
-        surah: masterData[i][2],
-        ayatMulai: masterData[i][3],
-        ayatAkhir: masterData[i][4],
-        retentionStatus: status,
-        nextReview: masterData[i][8]
-      });
-    }
+    unitList.push({
+      idMaster: units[i].idMaster,
+      surah: units[i].surah,
+      ayatMulai: units[i].ayatMulai,
+      ayatAkhir: units[i].ayatAkhir,
+      retentionStatus: status,
+      nextReview: units[i].nextReview
+    });
   }
 
   // Gamifikasi
@@ -1745,39 +1874,35 @@ function ortuGetDashboard(session) {
   let xp = 0;
   let level = 1;
   let longestStreak = 0;
-  if (gamifSheet) {
-    const gData = gamifSheet.getDataRange().getValues();
-    for (let i = 1; i < gData.length; i++) {
-      if (String(gData[i][0]) === String(santriId)) {
-        xp = Number(gData[i][1]) || 0;
-        level = Number(gData[i][2]) || 1;
-        streak = Number(gData[i][3]) || 0;
-        longestStreak = Number(gData[i][4]) || 0;
-        break;
-      }
+  const gamifRows = readSheet_('Gamifikasi', 6);
+  for (let i = 0; i < gamifRows.length; i++) {
+    if (String(gamifRows[i][0]) === String(santriId)) {
+      xp = Number(gamifRows[i][1]) || 0;
+      level = Number(gamifRows[i][2]) || 1;
+      streak = Number(gamifRows[i][3]) || 0;
+      longestStreak = Number(gamifRows[i][4]) || 0;
+      break;
     }
   }
 
-  // Recent test history
+  // Riwayat tes (maks 100 terbaru, urut terbaru lebih dahulu)
   const testHistory = [];
-  if (tesSheet) {
-    const tData = tesSheet.getDataRange().getValues();
-    for (let i = 1; i < tData.length; i++) {
-      if (String(tData[i][2]) === String(santriId)) {
-        testHistory.push({
-          idTes: tData[i][0],
-          tgl: toDateStr(tData[i][1]),
-          surah: tData[i][4],
-          ayatMulai: tData[i][5],
-          ayatAkhir: tData[i][6],
-          kualitas: tData[i][7],
-          pelapor: tData[i][8]
-        });
-      }
+  const tesRows = readSheet_('Riwayat_Tes', 9);
+  for (let i = 0; i < tesRows.length; i++) {
+    if (String(tesRows[i][2]) === String(santriId)) {
+      testHistory.push({
+        idTes: tesRows[i][0],
+        tgl: toDateStr(tesRows[i][1]),
+        surah: tesRows[i][4],
+        ayatMulai: tesRows[i][5],
+        ayatAkhir: tesRows[i][6],
+        kualitas: tesRows[i][7],
+        pelapor: tesRows[i][8]
+      });
     }
   }
 
-  return {
+  const result = {
     success: true,
     ortuName: session.nama,
     santriId: santriId,
@@ -1798,10 +1923,11 @@ function ortuGetDashboard(session) {
       streak: streak
     },
     unitList: unitList,
-    // Kirim riwayat lebih banyak agar filter bulan di klien berguna
-    // (UI tetap membatasi tampilan). Diurutkan terbaru lebih dulu.
     recentTests: testHistory.slice(-100).reverse()
   };
+
+  dashCachePut_(cacheKey, result, DASH_CACHE_TTL_SEC);
+  return result;
 }
 
 // Ortu Smart Random Test (PRD Section 12)
@@ -1815,19 +1941,18 @@ function ortuGetRandomTest(session) {
     return { success: false, message: 'Akun ini belum terhubung ke data santri (ID_Terkait kosong)' };
   }
 
-  const masterSheet = getSheet('Master_Hafalan');
-  const masterData = masterSheet.getDataRange().getValues();
   const todayStr = appTodayStr();
+  const indexedUnits = buildMasterIndex_()[santriId] || [];
 
   const pool = [];
-  for (let i = 1; i < masterData.length; i++) {
-    if (String(masterData[i][1]) === String(santriId)) {
-      const diffDays = diffDaysFrom(masterData[i][5]);
+  for (let i = 0; i < indexedUnits.length; i++) {
+    const unitRow = indexedUnits[i];
+      const diffDays = diffDaysFrom(unitRow.tglMulai);
 
       // Keluarkan hafalan yang terlalu baru (<1 hari)
       if (diffDays >= 1) {
-        const status = masterData[i][7] || 'Hijau';
-        const nextReview = toDateStr(masterData[i][8]) || todayStr;
+        const status = unitRow.retentionStatus || 'Hijau';
+        const nextReview = unitRow.nextReview || todayStr;
         const isOverdue = nextReview <= todayStr;
 
         // Weighting: Merah / Overdue prioritas paling tinggi
@@ -1837,20 +1962,20 @@ function ortuGetRandomTest(session) {
         if (isOverdue) weight += 2;
 
         pool.push({
-          idMaster: masterData[i][0],
-          surah: masterData[i][2],
-          ayatMulai: masterData[i][3],
-          ayatAkhir: masterData[i][4],
+          idMaster: unitRow.idMaster,
+          surah: unitRow.surah,
+          ayatMulai: unitRow.ayatMulai,
+          ayatAkhir: unitRow.ayatAkhir,
           retentionStatus: status,
           weight: weight
         });
       }
-    }
   }
 
   if (pool.length === 0) {
     return {
       success: false,
+      code: 'E_VALIDATION',
       message: 'Belum ada hafalan yang memenuhi syarat untuk diuji (minimal berumur 1 hari).'
     };
   }
@@ -1994,7 +2119,7 @@ function ortuSendApresiasi(session, payload) {
  */
 function appendAyahCacheIfMissing(cacheSheet, surah, ayahNum, arabicText, audioUrl, translationText) {
   return withLock(function () {
-    const rows = cacheSheet.getDataRange().getValues();
+    const rows = cacheSheet.getRange(1, 1, Math.max(1, cacheSheet.getLastRow()), 6).getValues();
     for (let i = 1; i < rows.length; i++) {
       if (String(rows[i][0]) === String(surah) && Number(rows[i][1]) === Number(ayahNum)) {
         return { success: true, skipped: true }; // sudah ada -> tidak menulis ulang
@@ -2009,10 +2134,12 @@ function getAyahContent(surah, ayah) {
   const ayahNum = Number(ayah);
   if (!ayahNum || ayahNum < 1) {
     return { success: false, code: 'E_VALIDATION', message: 'Nomor ayat tidak valid' };
-  }  const cacheSheet = getSheet('Cache_Ayat');
-  const cacheData = cacheSheet.getDataRange().getValues();
+  }
+  const cacheSheet = getSheet('Cache_Ayat');
+  const cacheData = readSheet_('Cache_Ayat', 6);
+  const cacheRowOffset = 2; // readSheet_ mulai dari baris 2 (setelah header)
 
-  for (let i = 1; i < cacheData.length; i++) {
+  for (let i = 0; i < cacheData.length; i++) {
     if (String(cacheData[i][0]) === String(surah) && Number(cacheData[i][1]) === ayahNum) {
       const cachedArabic = cacheData[i][2] || '';
       const cachedAudio = cacheData[i][3] || '';
@@ -2108,7 +2235,7 @@ function getAyahContent(surah, ayah) {
 
 function runNightlyRetentionRecompute() {
   const masterSheet = getSheet('Master_Hafalan');
-  const masterData = masterSheet.getDataRange().getValues();
+  const masterData = readSheet_('Master_Hafalan', 12);
   const todayDateStr = appTodayStr();
 
   // Downgrade terjadwal: unit Hijau yang jadwal reviewnya terlewat >= 3 hari -> Kuning.
@@ -2116,7 +2243,7 @@ function runNightlyRetentionRecompute() {
   const statusColumn = [];
   let changed = false;
 
-  for (let i = 1; i < masterData.length; i++) {
+  for (let i = 0; i < masterData.length; i++) {
     const nextReview = toDateStr(masterData[i][8]);
     const currentStatus = masterData[i][7] || 'Hijau';
     let newStatus = currentStatus;
@@ -2137,15 +2264,16 @@ function runNightlyRetentionRecompute() {
   // Bersihkan token sesi kedaluwarsa — batch: kumpulkan blok baris kontigu,
   // lalu hapus sekali deleteRows per blok (bukan deleteRow per baris).
   const sessionSheet = getSheet('Sessions');
-  const sessionData = sessionSheet.getDataRange().getValues();
+  const sessionData = readSheet_('Sessions', 6);
   const now = new Date();
   let blockStart = -1;
   let blockEnd = -1;
-  for (let j = sessionData.length - 1; j >= 1; j--) {
+  // Index 0 = baris sheet ke-2 -> nomor baris = j + 2.
+  for (let j = sessionData.length - 1; j >= 0; j--) {
     const expiry = new Date(sessionData[j][3]);
     const expired = !isNaN(expiry.getTime()) && expiry < now;
     if (expired) {
-      const row = j + 1;
+      const row = j + 2;
       if (blockEnd === -1) {
         blockStart = row;
         blockEnd = row;
@@ -2161,6 +2289,7 @@ function runNightlyRetentionRecompute() {
   if (blockEnd !== -1) {
     sessionSheet.deleteRows(blockStart, blockEnd - blockStart + 1);
   }
+  bumpDashVersion_(); // data berubah -> cache dashboard dibuang
 
   // Catat jejak eksekusi agar healthCheck() bisa membuktikan batch benar-benar
   // berjalan (dulu tidak ada jejak apa pun, sehingga "trigger lupa dipasang"

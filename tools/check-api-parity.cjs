@@ -131,6 +131,40 @@ writeList.forEach(a => {
   }
 });
 
+// --- 7. penjaga performa: dashboard tidak boleh memindai sheet per santri ----
+function functionBody(source, name) {
+  const start = source.indexOf(`function ${name}(`);
+  if (start < 0) return null;
+  const nextFn = source.indexOf('\nfunction ', start + 1);
+  const raw = source.slice(start, nextFn < 0 ? source.length : nextFn);
+  // Buang komentar agar penyebutan nama fungsi di dokumentasi tidak dianggap kode.
+  return raw
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .split('\n')
+    .map(line => line.replace(/\/\/.*$/, ''))
+    .join('\n');
+}
+
+['ustazGetDashboard', 'santriGetDashboard', 'ortuGetDashboard'].forEach(fn => {
+  const body = functionBody(CODE_GS, fn);
+  if (!body) {
+    errors.push(`Fungsi ${fn} tidak ditemukan di Code.gs.`);
+    return;
+  }
+  if (/getDataRange\(\)/.test(body)) {
+    errors.push(`${fn} memakai getDataRange() (baca seluruh grid) — gunakan readSheet_() dengan kolom minimal.`);
+  }
+  if (!/buildMasterIndex_\(\)/.test(body) && fn !== 'santriGetDashboard' && fn !== 'ortuGetDashboard') {
+    errors.push(`${fn} tidak memakai buildMasterIndex_() — risiko kembali ke pemindaian O(santri x baris).`);
+  }
+});
+
+// Validasi sesi harus dilayani cache lebih dulu (biaya tetap per request).
+const validateBody = functionBody(CODE_GS, 'validateSession') || '';
+if (!/sess:/.test(validateBody)) {
+  errors.push('validateSession tidak memakai cache sesi — setiap request akan membaca sheet Sessions.');
+}
+
 // --- laporan ---------------------------------------------------------------
 warnings.forEach(w => console.log(`  ! ${w}`));
 if (errors.length === 0) {

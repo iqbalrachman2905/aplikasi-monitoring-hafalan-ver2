@@ -227,13 +227,21 @@ M = sedang, L = besar.
 - [ ] **Uji unit retention engine** — runner `node tools/test-retention.cjs`;
   kasus uji: interval naik/turun, recovery Merah→Kuning 2× Lancar, cap 60 hari,
   streak 1×/hari *(M)*
-- [ ] **Rekap agregat (`Rekap_Santri`)** — dashboard Ustaz dari O(santri×baris)
-  menjadi O(santri); menyempitkan 34 pemanggilan `getDataRange()` *(M)*
-- [ ] **Sesi & dashboard berbasis `CacheService`** (TTL pendek) — memutus biaya
-  `validateSession` di setiap request *(S)*
+- [x] **Indeks sekali baca (`buildMasterIndex_`)** — dashboard Ustaz dari
+  O(santri × baris) menjadi O(baris): Master_Hafalan dibaca sekali lalu
+  dikelompokkan per santri *(M)*
+- [x] **Kolom minimal di `readSheet_()`** — jumlah `getDataRange()` turun dari
+  34 → 3 (sisanya hanya `Config` yang memang kecil); termasuk di jalur tulis
+  (setoran, target, notifikasi, cache ayat) *(S)*
+- [x] **Sesi & dashboard berbasis `CacheService`** — `validateSession` dilayani
+  cache (TTL mengikuti masa berlaku token), dashboard pakai TTL 20–30 dtk dengan
+  versi data yang naik setiap penulisan, jadi tulisan selalu langsung terlihat *(S)*
 - [ ] **Idempotensi tingkat bisnis** — upsert murojaah per (santri, jenis, unit,
   tanggal) sebagai pertahanan kedua di luar `requestId` *(M)*
-- [ ] **Broadcast O(1)** — 1 baris pengumuman + penanda baca, bukan N baris *(S)*
+- [ ] **Broadcast & arsip** — tetap N baris (keputusan: skema Notifikasi tidak diubah),
+  sehingga penghematannya lewat **arsip/pemangkasan otomatis** riwayat lama *(S)*
+- [ ] **`get_ayah_range`** — 1 fetch untuk banyak ayat + susun flashcard paralel
+  (sekarang 3–4 request berurutan per kartu) *(M)*
 - [ ] **Arsip otomatis riwayat lama** — pindahkan baris `Hafalan`/`Murojaah`/`Notifikasi`
   lebih tua dari `ARCHIVE_AMBANG_BULAN` ke spreadsheet arsip via cron malam *(M)*
 - [ ] **Hardening token & brute-force login** — penundaan progresif setelah N gagal

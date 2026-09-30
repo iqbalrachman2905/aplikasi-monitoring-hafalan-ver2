@@ -166,6 +166,9 @@ Fokus rilis ini: **memutus lingkaran "putus–nyambung"** (data besar → reques
 | 🧪 Uji otomatis | `npm run verify` = cek sintaks (10 file JS + `Code.gs`) + **uji paritas mock↔backend** + **24 uji lapisan API** (mock, taksonomi error, retry aman). CI menjalankan ini **sebelum** deploy |
 | 🙈 Kebocoran | Folder `backend/` (berisi ID spreadsheet & panduan setup) dan dokumen internal **tidak lagi** ikut terbit ke GitHub Pages |
 | 👤 Operator | `SPREADSHEET_ID` bisa dipindahkan ke Script Properties (tanpa edit kode); backend melaporkan versinya sehingga frontend bisa memperingatkan **"backend masih versi lama, buat deployment baru"** |
+| ⚡ Performa baca | Dashboard Ustaz dari **O(santri × baris)** menjadi **O(baris)**: `Master_Hafalan` dibaca **sekali** lalu diindeks per santri; jumlah `getDataRange()` turun **34 → 3** (kolom minimal) |
+| 🗃️ Cache lintas-request | **Validasi sesi** dilayani `CacheService` (dulu membaca seluruh sheet `Sessions` di SETIAP request); dashboard memakai TTL 20–30 dtk dengan **versi data yang naik setiap penulisan**, sehingga setelah menyimpan data selalu langsung terlihat |
+| 🚪 Logout lebih ringan | Tidak lagi `deleteRow` (mahal karena menggeser baris) — token ditandai kedaluwarsa + dibuang dari cache, pembersihan fisik tetap oleh batch malam |
 
 > ⚠️ Setelah mengganti `Code.gs`, **wajib buat deployment versi baru** (Deploy ➔ Manage deployments ➔ Edit ➔ New version). Bila belum, aplikasi akan menampilkan peringatan bahwa backend masih versi lama — ini disengaja agar masalah "sudah dibenerin tapi masih error" langsung terlihat.
 
