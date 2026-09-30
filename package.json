@@ -1,0 +1,14 @@
+{
+  "name": "aplikasi-monitoring-hafalan",
+  "version": "4.2.0",
+  "private": true,
+  "description": "Aplikasi monitoring hafalan Al-Qur'an berbasis retensi (spaced repetition) — HTML/CSS/JS murni tanpa build step.",
+  "scripts": {
+    "start": "node tools/serve.cjs",
+    "serve": "node tools/serve.cjs",
+    "check": "node tools/check-syntax.cjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -1,0 +1,47 @@
+# ==============================================================================
+# Quran Retention App — Git Ignore
+# ==============================================================================
+
+# --- File sistem operasi ---
+.DS_Store
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# --- Editor / IDE ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.settings/
+
+# --- Node / npm (proyek tanpa dependency, tapi tetap dijaga) ---
+node_modules/
+npm-debug.log*
+yarn-error.log*
+package-lock.json.bak
+
+# --- Log & file sementara ---
+*.log
+*.tmp
+*.bak
+*.orig
+.cache/
+
+# --- Lingkungan & kredensial (jangan pernah commit) ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials*.json
+service-account*.json
+
+# --- File kerja lokal Freebuff (di luar proyek yang di-deploy) ---
+.freebuff/
+
+# --- Pratinjau / screenshot lokal ---
+preview/
+screenshots/
