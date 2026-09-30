@@ -8,6 +8,32 @@ const UI = {
   currentAudio: null,
   isPlayingAudio: false,
 
+  /** Penanda aksi yang sedang berjalan, agar klik ganda tidak mengirim 2x. */
+  busy: {},
+
+  /**
+   * Jalankan fungsi async SEKALI saja sampai selesai. Overlay loading hanya
+   * bersifat visual — tanpa penjaga ini, klik ganda pada tombol simpan
+   * (mis. murojaah/ setoran) bisa mengirim dua request dan menggandakan XP.
+   *
+   * @param {string} key kunci unik aksi, mis. 'murojaah'
+   * @param {function(): Promise<any>} fn
+   * @param {string} [busyMessage] pesan yang ditampilkan bila aksi masih berjalan
+   * @returns {Promise<any>|null} null bila aksi sedang berjalan
+   */
+  async runOnce(key, fn, busyMessage) {
+    if (this.busy[key]) {
+      if (busyMessage) this.toast(busyMessage, 'gold');
+      return null;
+    }
+    this.busy[key] = true;
+    try {
+      return await fn();
+    } finally {
+      this.busy[key] = false;
+    }
+  },
+
   init() {
     // Event listener tombol close modal
     document.querySelectorAll('[data-close-modal]').forEach(btn => {

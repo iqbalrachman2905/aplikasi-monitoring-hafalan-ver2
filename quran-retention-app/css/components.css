@@ -753,3 +753,35 @@ body.kid-mode #view-santri .arabic-text-lg {
   color: var(--gold-700);
   flex: 0 0 auto;
 }
+
+/* ============================================================================
+   INBOX NOTIFIKASI SANTRI (v4.3)
+   Kelas ini menggantikan inline-style lama agar status "belum dibaca" bisa
+   ditandai secara visual (dulu semua notifikasi tampak sama dan Status_Baca
+   tidak pernah berubah karena endpoint mark-read tidak pernah dipanggil UI).
+   ========================================================================== */
+.notif-item {
+  padding: 0.75rem;
+  border-bottom: 1px solid var(--border-light);
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: background 0.2s ease;
+}
+
+.notif-item:hover,
+.notif-item:focus-visible {
+  background: var(--emerald-50);
+}
+
+.notif-unread {
+  background: linear-gradient(90deg, rgba(245, 158, 11, 0.12), rgba(245, 158, 11, 0));
+  border-left: 3px solid var(--gold-500);
+}
+
+.notif-item[data-unread="0"] {
+  cursor: default;
+  opacity: 0.85;
+}

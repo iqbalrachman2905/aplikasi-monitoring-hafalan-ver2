@@ -8,19 +8,216 @@
 
 const API = {
   /**
-   * Request wrapper utama
+   * Aksi yang MENGUBAH data (menulis ke spreadsheet).
+   * Dipakai untuk memilih batas waktu & kebijakan percobaan ulang otomatis.
+   */
+  WRITE_ACTIONS: [
+    'login', 'logout',
+    'ustaz_add_setoran', 'ustaz_save_target', 'ustaz_send_feedback', 'ustaz_send_broadcast',
+    'santri_confirm_murojaah', 'santri_submit_flashcard_test', 'santri_mark_notif_read',
+    'ortu_submit_test_result', 'ortu_send_apresiasi'
+  ],
+
+  /** Aksi yang memanggil provider ayat eksternal di sisi server. */
+  AYAH_ACTIONS: ['get_ayah_content'],
+
+  /**
+   * Taksonomi kode error. Sebelumnya semua kegagalan (timeout, offline, deploy
+   * salah, sesi habis, server sibuk) tampil sebagai satu kalimat "koneksi
+   * putus", sehingga salah diagnosis. Sekarang tiap kondisi punya kode sendiri.
+   */
+  ERR: {
+    OFFLINE: 'E_OFFLINE',       // tidak ada internet / DNS gagal
+    TIMEOUT: 'E_TIMEOUT',       // server belum menjawab sampai batas waktu
+    DEPLOY: 'E_DEPLOY',         // respons bukan JSON (deployment belum "Anyone")
+    CONTRACT: 'E_CONTRACT',     // respons tidak sesuai kontrak API (backend lama)
+    AUTH: 'E_AUTH',             // sesi habis / tidak valid
+    FORBIDDEN: 'E_FORBIDDEN',   // role tidak berhak
+    BUSY: 'E_BUSY',             // server sibuk (lock), aman dicoba lagi
+    QUOTA: 'E_QUOTA',           // kuota Google / runtime habis
+    UPSTREAM: 'E_UPSTREAM',     // provider ayat eksternal bermasalah
+    VALIDATION: 'E_VALIDATION', // data kiriman tidak valid
+    HTTP: 'E_HTTP',
+    UNKNOWN: 'E_UNKNOWN'
+  },
+
+  /** Pesan default per kode (dipakai bila server tidak mengirim pesan spesifik). */
+  ERROR_MESSAGES: {
+    E_OFFLINE: 'Tidak ada koneksi ke server. Periksa internet Anda lalu coba lagi.',
+    E_TIMEOUT: 'Server belum menjawab sampai batas waktu. Data mungkin sudah tersimpan — kami periksa ulang.',
+    E_DEPLOY: 'Deployment Google Apps Script belum dapat diakses publik (akses harus "Anyone"), atau URL di config.js salah.',
+    E_CONTRACT: 'Respons server tidak sesuai kontrak API. Kemungkinan deployment backend masih versi lama — buat deployment versi baru.',
+    E_AUTH: 'Sesi Anda telah berakhir. Silakan masuk kembali.',
+    E_FORBIDDEN: 'Akun Anda tidak memiliki hak untuk tindakan ini.',
+    E_BUSY: 'Server sedang sibuk menyimpan data. Coba lagi sebentar lagi.',
+    E_QUOTA: 'Batas kuota layanan Google tercapai. Coba lagi beberapa saat lagi.',
+    E_UPSTREAM: 'Sumber ayat eksternal sedang tidak merespons. Coba lagi nanti.',
+    E_VALIDATION: 'Data yang dikirim belum valid.',
+    E_HTTP: 'Server membalas dengan kesalahan HTTP.',
+    E_UNKNOWN: 'Terjadi kesalahan yang tidak dikenali. Coba lagi sebentar.'
+  },
+
+  /** Capability & versi backend, diambil dari respons server terakhir. */
+  serverCaps: null,
+  serverVersion: null,
+  _versionWarned: false,
+
+  /** ID unik per NIAT pengguna (bukan per percobaan kirim). */
+  newRequestId() {
+    const rnd = Math.random().toString(36).slice(2, 10);
+    return 'req-' + Date.now().toString(36) + '-' + rnd;
+  },
+
+  isWriteAction(action) {
+    return this.WRITE_ACTIONS.indexOf(String(action)) !== -1;
+  },
+
+  /** Batas waktu berbeda per jenis aksi (dulu seragam 8 dtk untuk semua). */
+  timeoutFor(action) {
+    const p = (APP_CONFIG && APP_CONFIG.API_POLICY) || {};
+    if (this.AYAH_ACTIONS.indexOf(String(action)) !== -1) return Number(p.TIMEOUT_AYAH_MS || 12000);
+    if (this.isWriteAction(action)) return Number(p.TIMEOUT_WRITE_MS || 25000);
+    return Number(p.TIMEOUT_READ_MS || 15000);
+  },
+
+  /** Apakah backend mengaku mendukung idempotency (penangkal data dobel)? */
+  serverSupportsIdempotency() {
+    return !!(this.serverCaps && this.serverCaps.idempotency);
+  },
+
+  /** Bangun respons kegagalan yang konsisten + kode error. */
+  _fail(code, message, extra) {
+    const base = {
+      success: false,
+      code: code,
+      message: message || this.ERROR_MESSAGES[code] || this.ERROR_MESSAGES.E_UNKNOWN,
+      retryable: false
+    };
+    // offline=true dipakai layar login untuk menawarkan "Gunakan Mode Demo"
+    if (code === this.ERR.OFFLINE || code === this.ERR.TIMEOUT || code === this.ERR.DEPLOY || code === this.ERR.CONTRACT) {
+      base.offline = true;
+    }
+    const result = Object.assign(base, extra || {});
+    return { result: result, code: code };
+  },
+
+  /** Simpan capability/versi backend + ingatkan bila versi tidak sinkron. */
+  _captureCapabilities(result) {
+    if (!result || typeof result !== 'object') return;
+    if (result.capabilities) this.serverCaps = result.capabilities;
+    if (result.appVersion) this.serverVersion = String(result.appVersion);
+
+    if (this._versionWarned) return;
+    const feVersion = (APP_CONFIG && APP_CONFIG.APP_VERSION) || '';
+    if (this.serverVersion && this.serverVersion !== feVersion) {
+      this._versionWarned = true;
+      console.warn(`[API] Versi backend (${this.serverVersion}) berbeda dari frontend (${feVersion}). Buat deployment Apps Script versi baru.`);
+      UI.toast(`Backend Google Apps Script masih v${this.serverVersion} (frontend v${feVersion}). Perbaikan backend BELUM aktif — buat deployment versi baru.`, 'error', 7000);
+    } else if (!this.serverCaps) {
+      this._versionWarned = true;
+      console.warn('[API] Backend belum melaporkan capability (deployment lama). Pengamanan request ganda belum aktif.');
+      UI.toast('Backend Google Apps Script masih versi lama: pengamanan anti-data-dobel belum aktif. Silakan deploy ulang Code.gs.', 'gold', 7000);
+    }
+  },
+
+  /**
+   * Satu kali percobaan kirim (tanpa logika percobaan ulang).
+   * @returns {{result: object, code: string|null}}
+   */
+  async _sendOnce(action, payload) {
+    const startedAt = Date.now();
+    const timeoutMs = this.timeoutFor(action);
+    const controller = new AbortController();
+    let didTimeout = false;
+    const timeoutId = setTimeout(() => { didTimeout = true; controller.abort(); }, timeoutMs);
+
+    try {
+      // WAJIB text/plain;charset=utf-8 agar tidak kena CORS preflight pada GAS
+      const response = await fetch(APP_CONFIG.API_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify(payload),
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        return this._fail(this.ERR.HTTP, `Server membalas HTTP ${response.status}.`, {
+          retryable: response.status >= 500,
+          httpStatus: response.status,
+          durationMs: Date.now() - startedAt
+        });
+      }
+
+      // GAS yang belum publik membalas redirect (302) ke halaman login Google,
+      // sehingga isinya HTML — bukan JSON.
+      const raw = await response.text();
+      let result;
+      try {
+        result = JSON.parse(raw);
+      } catch (parseErr) {
+        console.warn('[API] Respons bukan JSON (kemungkinan deployment belum publik / URL salah).');
+        return this._fail(this.ERR.DEPLOY, this.ERROR_MESSAGES.E_DEPLOY, {
+          misconfigured: true,
+          durationMs: Date.now() - startedAt
+        });
+      }
+
+      this._captureCapabilities(result);
+
+      if (result.unauthorized) {
+        Auth.logout();
+        UI.toast('Sesi telah berakhir, silakan login kembali', 'error');
+        return { result: { success: false, code: this.ERR.AUTH, message: 'Sesi berakhir', unauthorized: true }, code: this.ERR.AUTH };
+      }
+
+      if (typeof result.success === 'undefined') {
+        return this._fail(this.ERR.CONTRACT, this.ERROR_MESSAGES.E_CONTRACT, {
+          durationMs: Date.now() - startedAt
+        });
+      }
+
+      if (!result.success) {
+        // Kode dari server (E_BUSY/E_VALIDATION/E_FORBIDDEN/...) dipertahankan.
+        const code = result.code || this.ERR.VALIDATION;
+        result.message = result.message || this.ERROR_MESSAGES[code] || this.ERROR_MESSAGES.E_UNKNOWN;
+        return { result: result, code: code };
+      }
+
+      return { result: result, code: null };
+    } catch (err) {
+      clearTimeout(timeoutId);
+      const durationMs = Date.now() - startedAt;
+      if (didTimeout || (err && err.name === 'AbortError')) {
+        console.warn(`[API] Timeout ${timeoutMs}ms pada aksi ${action}.`);
+        return this._fail(this.ERR.TIMEOUT, `Server belum menjawab dalam ${Math.round(timeoutMs / 1000)} detik.`, {
+          retryable: true,
+          durationMs: durationMs
+        });
+      }
+      console.warn(`[API] Gagal menghubungi backend: ${err.message}`);
+      return this._fail(this.ERR.OFFLINE, this.ERROR_MESSAGES.E_OFFLINE, {
+        retryable: true,
+        durationMs: durationMs
+      });
+    }
+  },
+
+  /**
+   * Request wrapper utama.
+   * - Mode Demo: dilayani handleMockRequest (lokal, instan).
+   * - Mode Live: dikirim ke GAS dengan batas waktu per jenis aksi, lalu bila
+   *   timeout pada aksi tulis DAN backend mendukung idempotency, dikirim ulang
+   *   SEKALI dengan requestId yang SAMA sehingga tidak menghasilkan data dobel.
+   * - Setiap respons punya `code` (lihat API.ERR) agar pesan error spesifik.
    */
   async request(action, data = {}) {
     const token = Auth.getToken();
-    const payload = {
-      action: action,
-      token: token,
-      ...data
-    };
+    // requestId dibuat SEKALI per niat: percobaan ulang memakai id yang sama.
+    const requestId = this.newRequestId();
+    const payload = Object.assign({ action: action, token: token, requestId: requestId }, data);
 
-    // Jika mode mock aktif, proses secara instan lokal.
-    // Setelah aksi yang mengubah data, snapshot disimpan ke localStorage agar
-    // target & riwayat tes tetap ada walau halaman di-refresh.
+    // Mode mock: proses instan lokal + simpan snapshot agar tahan refresh.
     if (APP_CONFIG.DATA_MODE === 'mock') {
       const result = this.handleMockRequest(action, payload);
       if (result && result.success && typeof mockSaveState === 'function') {
@@ -29,73 +226,36 @@ const API = {
       return result;
     }
 
-    try {
-      // Timeout controller 8 detik
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 8000);
+    const isWrite = this.isWriteAction(action);
+    const policy = (APP_CONFIG && APP_CONFIG.API_POLICY) || {};
+    const retryBudget = Number(isWrite ? policy.RETRY_ON_TIMEOUT_WRITE : policy.RETRY_ON_TIMEOUT_READ) || 0;
+    const maxAttempts = 1 + Math.max(0, retryBudget);
 
-      // WAJIB text/plain;charset=utf-8 agar tidak kena CORS preflight pada GAS
-      const response = await fetch(APP_CONFIG.API_URL, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'text/plain;charset=utf-8'
-        },
-        body: JSON.stringify(payload),
-        signal: controller.signal
-      });
+    let last = null;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const outcome = await this._sendOnce(action, payload);
+      last = outcome;
 
-      clearTimeout(timeoutId);
+      if (outcome.result.success) return outcome.result;
+      if (outcome.code !== this.ERR.TIMEOUT) return outcome.result;
 
-      if (!response.ok) {
-        throw new Error(`HTTP Error ${response.status}`);
-      }
-
-      // GAS yang belum di-deploy sebagai "Anyone" membalas redirect (302) ke
-      // halaman login Google. Fetch mengikutinya dan mengembalikan HTML, bukan
-      // JSON — jadi kita baca sebagai teks dulu agar bisa memberi pesan jelas.
-      const raw = await response.text();
-      let result;
-      try {
-        result = JSON.parse(raw);
-      } catch (parseErr) {
-        console.warn('[API] Respons bukan JSON (kemungkinan deployment belum publik).');
-        return {
-          success: false,
-          offline: true,
-          misconfigured: true,
-          message: 'Server GAS tidak membalas JSON (akses deployment belum "Anyone"). '
-            + 'Aktifkan Mode Demo dari tombol di header, atau set ulang deployment Apps Script.'
-        };
-      }
-
-      // Cek unauthorized
-      if (result.unauthorized) {
-        Auth.logout();
-        UI.toast('Sesi telah berakhir, silakan login kembali', 'error');
-        return { success: false, message: 'Session expired', unauthorized: true };
-      }
-
-      // Respons di luar kontrak API (mis. doGet yang ikut terpanggil) tidak boleh
-      // dianggap sukses, agar data palsu tidak pernah tampil sebagai data asli.
-      if (typeof result.success === 'undefined') {
-        return {
-          success: false,
-          offline: true,
-          message: 'Respons server tidak sesuai kontrak API. Periksa deployment Google Apps Script (Web App akses "Anyone").'
-        };
-      }
-
-      return result;
-    } catch (err) {
-      // Mode Live TIDAK jatuh ke simulasi lokal: itu akan menampilkan seolah-olah
-      // data tersimpan padahal tidak ada yang terkirim ke spreadsheet.
-      console.warn(`[API] Gagal menghubungi backend GAS: ${err.message}`);
-      return {
-        success: false,
-        offline: true,
-        message: 'Gagal terhubung ke server (Mode Live). Periksa koneksi internet & URL deployment Google Apps Script.'
-      };
+      const canRetry = attempt < maxAttempts &&
+        (!isWrite || this.serverSupportsIdempotency());
+      if (!canRetry) break;
+      console.warn(`[API] Percobaan ulang ${attempt}/${maxAttempts - 1} untuk ${action} (requestId sama).`);
     }
+
+    // Timeout pada aksi tulis = status penyimpanan BELUM PASTI (server bisa jadi
+    // tetap menyelesaikan request setelah klien menyerah).
+    if (isWrite && last && last.code === this.ERR.TIMEOUT) {
+      last.result.uncertain = true;
+      if (this.serverSupportsIdempotency()) {
+        last.result.message = 'Server belum menjawab sampai batas waktu, meski sudah dicoba ulang. Data mungkin TERSIMPAN — memuat ulang data untuk memastikan.';
+      } else {
+        last.result.message = 'Server belum menjawab sampai batas waktu. Data mungkin TERSIMPAN. Backend masih versi lama (tanpa pengaman anti-dobel), jadi jangan ulangi perintah ini sebelum memeriksa daftar data.';
+      }
+    }
+    return last.result;
   },
 
   /**
@@ -647,8 +807,35 @@ const API = {
         return { success: true, message: 'Pesan apresiasi berhasil terkirim ke Ananda!' };
       }
 
+      case 'santri_mark_notif_read': {
+        // Mirror markNotificationRead() di Code.gs: tandai 1 notifikasi milik
+        // santri aktif sebagai sudah dibaca.
+        const sId = this.resolveMockSantriId(user);
+        const list = MOCK_STATE.notifications[sId] || [];
+        const target = list.find(n => String(n.idNotif) === String(payload.notifId));
+        if (!target) {
+          return { success: false, code: 'E_VALIDATION', message: 'Notifikasi tidak ditemukan' };
+        }
+        target.dibaca = true;
+        return { success: true, message: 'Notifikasi ditandai sudah dibaca' };
+      }
+
+      case 'logout': {
+        // Mode Demo tidak punya sesi server; logout ditangani Auth.logout().
+        return { success: true, message: 'Logout (Mode Demo)' };
+      }
+
       default:
-        return { success: true, message: 'Mock response OK' };
+        // JANGAN mengembalikan success:true untuk aksi yang belum ada. Mock yang
+        // "selalu berhasil" menyembunyikan fitur yang belum diimplementasikan —
+        // inilah yang dulu menutupi bug feedback Ustaz yang tidak sampai ke Santri.
+        console.warn('[Mock] action belum diimplementasikan:', action);
+        return {
+          success: false,
+          code: 'E_VALIDATION',
+          unknownAction: true,
+          message: `Mode Demo belum mendukung aksi "${action}". Lengkapi handleMockRequest() di api.js atau aktifkan Mode Live.`
+        };
     }
   }
 };

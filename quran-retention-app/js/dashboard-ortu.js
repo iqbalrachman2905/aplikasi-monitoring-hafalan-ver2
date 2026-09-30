@@ -370,6 +370,14 @@ const DashboardOrtu = {
   },
 
   async submitTestEvaluation(kualitas) {
+    // Anti klik-ganda: satu evaluasi hanya dikirim sekali sampai selesai.
+    if (UI.busy['ortu-tes']) { UI.toast('Evaluasi sedang disimpan, mohon tunggu...', 'gold'); return; }
+    UI.busy['ortu-tes'] = true;
+    try { return await this._submitTestEvaluation(kualitas); }
+    finally { UI.busy['ortu-tes'] = false; }
+  },
+
+  async _submitTestEvaluation(kualitas) {
     if (!this.currentRandomTest) return;
 
     UI.showLoading(true, `Menyimpan evaluasi "${kualitas}"...`);
@@ -391,7 +399,9 @@ const DashboardOrtu = {
         UI.toast(res.message || 'Evaluasi berhasil disimpan!', kualitas === 'Lancar' ? 'gold' : 'success');
         this.load(); // Refresh dashboard
       } else {
-        UI.toast(res.message || 'Gagal menyimpan evaluasi', 'error');
+        // Pesan spesifik per kode error (E_BUSY/E_TIMEOUT/E_AUTH/...).
+        UI.toast(res.message || 'Gagal menyimpan evaluasi', 'error', res.uncertain ? 7000 : 4500);
+        if (res.uncertain) this.load(); // status belum pasti -> sinkronkan tampilan
       }
     } catch (e) {
       UI.showLoading(false);
@@ -410,6 +420,13 @@ const DashboardOrtu = {
   },
 
   async sendSemangat() {
+    if (UI.busy['ortu-semangat']) { UI.toast('Pesan sedang dikirim, mohon tunggu...', 'gold'); return; }
+    UI.busy['ortu-semangat'] = true;
+    try { return await this._sendSemangat(); }
+    finally { UI.busy['ortu-semangat'] = false; }
+  },
+
+  async _sendSemangat() {
     const input = document.getElementById('input-pesan-semangat');
     const pesan = input ? input.value.trim() : '';
 
@@ -428,7 +445,7 @@ const DashboardOrtu = {
         UI.toast('Pesan cinta & semangat berhasil dikirim ke Ananda! ❤️', 'gold');
         if (input) input.value = '';
       } else {
-        UI.toast(res.message || 'Gagal mengirim pesan', 'error');
+        UI.toast(res.message || 'Gagal mengirim pesan', 'error', res.uncertain ? 7000 : 4500);
       }
     } catch (e) {
       UI.showLoading(false);

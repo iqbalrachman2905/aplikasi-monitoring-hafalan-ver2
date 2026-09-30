@@ -432,6 +432,14 @@ const DashboardUstaz = {
   },
 
   async submitSetoran() {
+    // Anti klik-ganda: setoran ganda = XP & baris antrean dobel.
+    if (UI.busy['ustaz-setoran']) { UI.toast('Setoran sedang disimpan, mohon tunggu...', 'gold'); return; }
+    UI.busy['ustaz-setoran'] = true;
+    try { return await this._submitSetoran(); }
+    finally { UI.busy['ustaz-setoran'] = false; }
+  },
+
+  async _submitSetoran() {
     const santriId = document.getElementById('input-setoran-santri').value;
     const surah = document.getElementById('input-setoran-surah').value;
     const ayatMulai = document.getElementById('input-setoran-mulai').value;
@@ -471,7 +479,8 @@ const DashboardUstaz = {
         UI.toast('Setoran santri berhasil dicatat dan masuk ke antrean Misi Sabaq!', 'gold');
         this.load();
       } else {
-        UI.toast(res.message || 'Gagal mencatat setoran', 'error');
+        UI.toast(res.message || 'Gagal mencatat setoran', 'error', res.uncertain ? 7000 : 4500);
+        if (res.uncertain) this.load();
       }
     } catch (e) {
       UI.showLoading(false);
@@ -585,6 +594,13 @@ const DashboardUstaz = {
   },
 
   async submitTarget() {
+    if (UI.busy['ustaz-target']) { UI.toast('Target sedang disimpan, mohon tunggu...', 'gold'); return; }
+    UI.busy['ustaz-target'] = true;
+    try { return await this._submitTarget(); }
+    finally { UI.busy['ustaz-target'] = false; }
+  },
+
+  async _submitTarget() {
     const santriId = document.getElementById('input-target-santri').value;
     const surah = document.getElementById('input-target-surah').value;
     const ayatMulai = document.getElementById('input-target-mulai').value;
@@ -618,7 +634,8 @@ const DashboardUstaz = {
         UI.toast('Target bulanan berhasil diperbarui!', 'success');
         this.load();
       } else {
-        UI.toast(res.message || 'Gagal menyimpan target', 'error');
+        UI.toast(res.message || 'Gagal menyimpan target', 'error', res.uncertain ? 7000 : 4500);
+        if (res.uncertain) this.load();
       }
     } catch (e) {
       UI.showLoading(false);
@@ -635,6 +652,13 @@ const DashboardUstaz = {
   },
 
   async submitFeedback() {
+    if (UI.busy['ustaz-feedback']) { UI.toast('Feedback sedang dikirim, mohon tunggu...', 'gold'); return; }
+    UI.busy['ustaz-feedback'] = true;
+    try { return await this._submitFeedback(); }
+    finally { UI.busy['ustaz-feedback'] = false; }
+  },
+
+  async _submitFeedback() {
     const pesan = document.getElementById('input-feedback-pesan').value.trim();
     if (!pesan) {
       UI.toast('Tulis pesan arahan terlebih dahulu', 'error');
@@ -655,7 +679,7 @@ const DashboardUstaz = {
       if (res.success) {
         UI.toast('Feedback berhasil terkirim ke dashboard santri!', 'success');
       } else {
-        UI.toast(res.message || 'Gagal mengirim feedback', 'error');
+        UI.toast(res.message || 'Gagal mengirim feedback', 'error', res.uncertain ? 7000 : 4500);
       }
     } catch (e) {
       UI.showLoading(false);
@@ -670,6 +694,13 @@ const DashboardUstaz = {
   },
 
   async submitBroadcast() {
+    if (UI.busy['ustaz-broadcast']) { UI.toast('Broadcast sedang dikirim, mohon tunggu...', 'gold'); return; }
+    UI.busy['ustaz-broadcast'] = true;
+    try { return await this._submitBroadcast(); }
+    finally { UI.busy['ustaz-broadcast'] = false; }
+  },
+
+  async _submitBroadcast() {
     const pesan = document.getElementById('input-broadcast-pesan').value.trim();
     if (!pesan) {
       UI.toast('Tulis pesan motivasi', 'error');
@@ -685,7 +716,7 @@ const DashboardUstaz = {
       if (res.success) {
         UI.toast('Pesan motivasi berhasil disiarkan!', 'gold');
       } else {
-        UI.toast(res.message || 'Gagal menyiarkan pesan', 'error');
+        UI.toast(res.message || 'Gagal menyiarkan pesan', 'error', res.uncertain ? 7000 : 4500);
       }
     } catch (e) {
       UI.showLoading(false);

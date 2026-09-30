@@ -15,8 +15,20 @@ const APP_CONFIG = {
   // mode di header / tombol "Gunakan Mode Demo" di layar login.
   DATA_MODE: 'api',
 
-  // Versi Aplikasi
-  APP_VERSION: '4.2.0',
+  // Versi Aplikasi (WAJIB sama dengan APP_VERSION di backend/Code.gs)
+  APP_VERSION: '4.3.0',
+
+  // Kebijakan batas waktu & pengulangan request.
+  // Penting: waktu tunggu KLIEN harus LEBIH PANJANG dari waktu tunggu lock di
+  // server (LOCK_ATTEMPTS x LOCK_WAIT_MS = ~10 dtk) agar pesan "server sibuk"
+  // dari server sempat sampai — bukan berubah menjadi "koneksi putus" palsu.
+  API_POLICY: {
+    TIMEOUT_READ_MS: 15000,   // dashboard, daftar misi, dll
+    TIMEOUT_WRITE_MS: 25000,  // setoran, murojaah, target, broadcast
+    TIMEOUT_AYAH_MS: 12000,   // get_ayah_content (bisa memicu fetch provider)
+    RETRY_ON_TIMEOUT_WRITE: 1, // jumlah percobaan ulang otomatis (aman: idempotency key)
+    RETRY_ON_TIMEOUT_READ: 1
+  },
 
   // Keys untuk Local Storage
   STORAGE_KEYS: {

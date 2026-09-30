@@ -275,32 +275,46 @@ const DashboardSantri = {
     const surahEl = document.getElementById('murojaah-surah-val');
     const surah = surahEl ? surahEl.textContent : '';
 
-    UI.showLoading(true, 'Menyimpan riwayat murojaah...');
-    try {
-      const res = await API.request('santri_confirm_murojaah', {
-        data: {
-          idMaster,
-          jenisMisi,
-          surah,
-          ayatMulai,
-          ayatAkhir,
-          kualitas // Lancar, Tersendat, Lupa
-        }
-      });
-      UI.showLoading(false);
-      UI.closeModal('modal-murojaah-confirm');
+    // runOnce: cegah klik ganda pada tombol Lancar/Tersendat/Lupa. Tanpa ini,
+    // satu klik ganda bisa mencatat murojaah (dan XP) dua kali.
+    await UI.runOnce('santri-murojaah', async () => {
+      UI.showLoading(true, 'Menyimpan riwayat murojaah...');
+      try {
+        const res = await API.request('santri_confirm_murojaah', {
+          data: {
+            idMaster,
+            jenisMisi,
+            surah,
+            ayatMulai,
+            ayatAkhir,
+            kualitas // Lancar, Tersendat, Lupa
+          }
+        });
+        UI.showLoading(false);
 
-      if (res.success) {
-        UI.celebrate();
-        UI.toast(res.message || 'Murojaah berhasil dicatat!', 'success');
-        this.load(); // Refresh data
-      } else {
-        UI.toast(res.message || 'Gagal menyimpan murojaah', 'error');
+        if (res.success) {
+          UI.closeModal('modal-murojaah-confirm');
+          UI.celebrate();
+          UI.toast(res.message || 'Murojaah berhasil dicatat!', 'success');
+          this.load(); // Refresh data
+          return;
+        }
+
+        // Tampilkan pesan spesifik per kode error (timeout / offline / sibuk /
+        // sesi habis) — bukan lagi satu kalimat "koneksi putus".
+        UI.toast(res.message || 'Gagal menyimpan murojaah', 'error', res.uncertain ? 7000 : 4500);
+
+        if (res.uncertain) {
+          // Status belum pasti: JANGAN biarkan user menekan ulang. Tutup modal
+          // dan muat ulang data supaya ia melihat keadaan sebenarnya.
+          UI.closeModal('modal-murojaah-confirm');
+          this.load();
+        }
+      } catch (e) {
+        UI.showLoading(false);
+        UI.toast('Error menyimpan data: ' + e.message, 'error');
       }
-    } catch (e) {
-      UI.showLoading(false);
-      UI.toast('Error menyimpan data', 'error');
-    }
+    }, 'Murojaah sedang disimpan, mohon tunggu...');
   },
 
   renderBadges() {
@@ -345,9 +359,36 @@ const DashboardSantri = {
     container.innerHTML = html;
   },
 
+  /** Klik notifikasi => tandai sudah dibaca (endpoint santri_mark_notif_read). */
+  bindNotificationEvents() {
+    const container = document.getElementById('santri-notifs-list');
+    if (!container || container.dataset.bound === 'true') return;
+    container.dataset.bound = 'true';
+    container.addEventListener('click', (e) => {
+      const item = e.target.closest('[data-notif-id]');
+      if (!item || item.getAttribute('data-unread') !== '1') return;
+      this.markNotificationRead(item.getAttribute('data-notif-id'), item);
+    });
+  },
+
+  async markNotificationRead(idNotif, itemEl) {
+    if (!idNotif) return;
+    // Optimistis: tampilan langsung berubah, server menyusul.
+    itemEl.setAttribute('data-unread', '0');
+    itemEl.classList.remove('notif-unread');
+    const res = await API.request('santri_mark_notif_read', { notifId: idNotif });
+    if (!res || !res.success) {
+      // Gagal -> kembalikan penanda "belum dibaca" agar tampilan tidak menipu.
+      itemEl.setAttribute('data-unread', '1');
+      itemEl.classList.add('notif-unread');
+    }
+  },
+
   renderNotifications() {
     const container = document.getElementById('santri-notifs-list');
     if (!container) return;
+
+    this.bindNotificationEvents();
 
     const notifs = this.data.notifications || [];
     if (notifs.length === 0) {
@@ -355,16 +396,27 @@ const DashboardSantri = {
       return;
     }
 
+    const unread = notifs.filter(n => !n.dibaca).length;
+    const header = unread > 0
+      ? `<div style="font-size: 0.72rem; color: var(--gold-700); font-weight: 700; margin-bottom: 0.5rem;">${unread} pesan belum dibaca — ketuk untuk menandai sudah dibaca</div>`
+      : '';
+
     // Semua nilai dari server di-escape: pesan feedback/broadcast/doa berasal
     // dari input pengguna (Ustaz/Ortu) sehingga rawan stored XSS bila mentah.
-    container.innerHTML = notifs.map(n => {
+    container.innerHTML = header + notifs.map(n => {
       const tipe = String(n.tipe || '');
       const icon = tipe.includes('Ortu') ? '❤️' : (tipe.includes('Ustaz') ? '📖' : '🔔');
+      const isUnread = !n.dibaca;
       return `
-      <div style="padding: 0.75rem; border-bottom: 1px solid var(--border-light); display: flex; align-items: flex-start; gap: 0.75rem;">
+      <div class="notif-item ${isUnread ? 'notif-unread' : ''}"
+           data-notif-id="${UI.escapeHTML(n.idNotif || '')}"
+           data-unread="${isUnread ? '1' : '0'}"
+           title="${isUnread ? 'Ketuk untuk menandai sudah dibaca' : ''}">
         <span style="font-size: 1.25rem;">${icon}</span>
         <div>
-          <div style="font-size: 0.75rem; font-weight: 700; color: var(--emerald-800); text-transform: uppercase;">${UI.escapeHTML(tipe)}</div>
+          <div style="font-size: 0.75rem; font-weight: 700; color: var(--emerald-800); text-transform: uppercase;">
+            ${UI.escapeHTML(tipe)} ${isUnread ? '<span class="status-pill status-yellow" style="font-size:0.6rem; padding:0.05rem 0.35rem;">Baru</span>' : ''}
+          </div>
           <div style="font-size: 0.85rem; color: var(--text-main);">${UI.escapeHTML(n.pesan)}</div>
           <div style="font-size: 0.7rem; color: var(--text-muted); margin-top: 0.2rem;">${UI.escapeHTML(n.tgl)}</div>
         </div>
