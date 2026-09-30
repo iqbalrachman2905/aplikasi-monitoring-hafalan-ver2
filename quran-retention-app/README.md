@@ -71,7 +71,8 @@ quran-retention-app/
 Proyek ini tanpa build step & tanpa dependency. Cukup jalankan dev server statis:
 
 ```bash
-npm start        # menjalankan tools/serve.cjs di http://127.0.0.1:8080/
+npm start        # dev server statis, default di http://localhost:8080/
+npm run verify   # cek sintaks + paritas mock↔backend + 24 uji lapisan API
 ```
 
 Atau tanpa Node: `cd quran-retention-app && python -m http.server 8080`.
@@ -144,6 +145,29 @@ const APP_CONFIG = {
 | **Ustaz** | `ustaz1` | `123456` |
 
 *Form login juga memvalidasi password (bukan hanya username). Tombol 1-Click Demo Switcher pada halaman login & bilah navigasi tetap tersedia untuk eksplorasi cepat; tombol tersebut otomatis beralih ke Mode Demo agar data spreadsheet asli tidak tercampur data simulasi.*
+
+---
+
+## 🛡️ Perbaikan v4.3 (Keandalan, Keamanan Data & Anti-Fitur-Hilang)
+
+Fokus rilis ini: **memutus lingkaran "putus–nyambung"** (data besar → request lambat → klien menyerah → user klik ulang → data dobel) dan **menghilangkan kegagalan senyap**.
+
+| Area | Perubahan |
+|---|---|
+| 🐞 Feedback Ustaz | **Bug lama diperbaiki:** `ustazSendFeedback` menulis ke sheet `Feedback` yang tidak pernah dibaca dashboard Santri, sehingga feedback ustaz HILANG di Mode Live (di Mode Demo tampak berhasil). Kini ditulis ke **Notifikasi** (dibaca Santri) **dan** tetap diarsipkan di `Feedback` |
+| 🔐 Otorisasi | Cek kelompok (`isSantriInUstazGroup`) kini juga di **setoran**, **target**, dan **feedback**; **broadcast dibatasi ke kelompok** ustaz (santri tanpa `ID_Ustaz` tetap diikutkan agar data migrasi tidak kehilangan pengumuman) |
+| 🔁 Anti data dobel | Setiap request membawa **`requestId`**; server menyimpan hasilnya (CacheService, 10 menit) dan mengembalikan hasil yang sama bila request yang sama datang lagi. Percobaan ulang otomatis hanya dilakukan bila backend mendukung idempotency |
+| ⏱️ Timeout & pesan error | Batas waktu **per jenis aksi** (baca 15 dtk, tulis 25 dtk, ayat 12 dtk) + **taksonomi kode error** (`E_OFFLINE`, `E_TIMEOUT`, `E_DEPLOY`, `E_CONTRACT`, `E_AUTH`, `E_BUSY`, `E_QUOTA`, `E_UPSTREAM`, `E_VALIDATION`) sehingga "koneksi putus" tidak lagi dipakai untuk semua masalah |
+| 🧭 Status belum pasti | Bila aksi tulis timeout, UI **tidak menyuruh mengulang**: modal ditutup, data dimuat ulang untuk memastikan, dan pesan menjelaskan bahwa data mungkin sudah tersimpan |
+| 🔒 Konsistensi lock | `ustazSendFeedback`, `ortuSendApresiasi`, `santriSubmitFlashcard` (penulisan paling sering!), dan penulisan cache ayat kini memakai `withLock()` + `flush()`; waktu tunggu lock server (±10 dtk) dibuat **lebih pendek** dari timeout klien |
+| ⏰ Trigger malam | `ensureNightlyTrigger()` memasang trigger otomatis saat login sukses (dulu harus manual — bila lupa, `Sessions` tumbuh tanpa batas dan `validateSession` makin lambat). Token kedaluwarsa juga dibersihkan *lazy* saat ditemukan |
+| 🩺 `healthCheck()` | Status sistem: versi, zona waktu, trigger terpasang?, `lastNightlyRun`, jumlah baris sheet kunci, plus daftar peringatan |
+| 🚫 Setup via HTTP dihapus | Endpoint `setup_database` + `SETUP_SECRET` **dihapus**. `setupInitialDatabase()` hanya dijalankan dari editor Apps Script (fungsi GAS tidak terkspos HTTP) |
+| 🧪 Uji otomatis | `npm run verify` = cek sintaks (10 file JS + `Code.gs`) + **uji paritas mock↔backend** + **24 uji lapisan API** (mock, taksonomi error, retry aman). CI menjalankan ini **sebelum** deploy |
+| 🙈 Kebocoran | Folder `backend/` (berisi ID spreadsheet & panduan setup) dan dokumen internal **tidak lagi** ikut terbit ke GitHub Pages |
+| 👤 Operator | `SPREADSHEET_ID` bisa dipindahkan ke Script Properties (tanpa edit kode); backend melaporkan versinya sehingga frontend bisa memperingatkan **"backend masih versi lama, buat deployment baru"** |
+
+> ⚠️ Setelah mengganti `Code.gs`, **wajib buat deployment versi baru** (Deploy ➔ Manage deployments ➔ Edit ➔ New version). Bila belum, aplikasi akan menampilkan peringatan bahwa backend masih versi lama — ini disengaja agar masalah "sudah dibenerin tapi masih error" langsung terlihat.
 
 ---
 
