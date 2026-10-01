@@ -2,7 +2,8 @@
 
 > Dokumen ini untuk **dibaca pertama kali** saat melanjutkan pekerjaan di sesi/chat baru.
 > Terakhir diperbarui: **1 Oktober 2026** • Versi aplikasi: **4.4.0** • Branch kerja:
-> `arena/01a0f19f-aplikasi-monitoring-hafalan-ve` • PR: **#2** (ke `main`).
+> `arena/01a0f19f-aplikasi-monitoring-hafalan-ve` • **PR #2 sudah di-MERGE** ke `main`
+> (merge commit `1f4a076`; deploy GitHub Pages sukses, versi 4.4.0 sudah terbit).
 
 ---
 
@@ -14,17 +15,17 @@ melewati dua gelombang perbaikan:
 | Gelombang | Fokus | Status |
 |---|---|---|
 | **v4.3 (Gelombang 0)** | Memutus **kegagalan senyap** & **data dobel**: feedback ustaz yang hilang, celah otorisasi antar-kelompok, idempotensi `requestId`, taksonomi kode error, timeout per aksi, guard klik ganda, trigger malam otomatis, `backend/` tidak lagi terbit ke Pages, CI memverifikasi sebelum deploy | ✅ selesai |
-| **v4.4 (Gelombang 1 tahap 1–2)** | **Performa & perawatan data**: indeks sekali baca (O(santri×baris) → O(baris)), kolom minimal (`getDataRange` 34 → 3), sesi & dashboard via `CacheService`, arsip otomatis yang aman (default uji kering), `selfTest()`, uji retensi + paritas Mode Demo | ✅ selesai |
+| **v4.4 (Gelombang 1 tahap 1–2)** | **Performa & perawatan data**: indeks sekali baca (O(santri×baris) → O(baris)), kolom minimal (`getDataRange` 34 → 3), sesi & dashboard via `CacheService`, arsip otomatis yang aman (default uji kering), `selfTest()`, uji retensi + paritas Mode Demo | ✅ selesai & **sudah merge ke `main`** (`1f4a076`) |
 | **Berikutnya (tahap 3)** | Jalur ayat & flashcard: `get_ayah_range` (1 fetch banyak ayat), penyusunan kartu paralel, cache ayat di klien; lalu idempotensi tingkat bisnis & rate limit login | ⏳ belum |
 
-**Semua uji hijau:** `npm run verify` → 47 uji otomatis (24 lapisan API + 23 retensi/arsip) + cek sintaks + penjaga paritas.
+**Semua uji hijau:** `npm run verify` → **85 uji otomatis** (24 lapisan API + 28 retensi/paritas + 33 simulasi arsip) + cek sintaks + penjaga regresi.
 
 ---
 
 ## 2. Perintah wajib sebelum menyentuh kode
 
 ```bash
-npm run verify   # WAJIB hijau sebelum commit: sintaks + paritas + 47 uji
+npm run verify   # WAJIB hijau sebelum commit: sintaks + paritas + 85 uji
 npm start        # dev server: http://localhost:8080 (bind 0.0.0.0)
 ```
 
@@ -44,7 +45,8 @@ Mode Live butuh deployment Apps Script (lihat `backend/SetupGuide.md`).
 | `quran-retention-app/js/ui.js` | `UI.runOnce()` — pengaman klik ganda untuk semua aksi tulis |
 | `tools/check-api-parity.cjs` | 8 kelompok penjaga regresi: action mock↔backend, feedback→Notifikasi, mock default, `setup_database`, idempotensi, performa dashboard, keselamatan arsip, `selfTest` read-only |
 | `tools/test-api.cjs` | 24 uji lapisan API (mock, taksonomi error, anti-data-dobel, peringatan versi) |
-| `tools/test-retention.cjs` | 23 uji retensi + **paritas backend↔mock** + perhitungan tanggal arsip |
+| `tools/test-retention.cjs` | 28 uji: retensi (cap 60 hari, recovery 2× Lancar), **paritas backend↔mock**, tanggal arsip, kolom arsip |
+| `tools/test-archive.cjs` | 33 uji: fungsi arsip **asli** dijalankan di atas Spreadsheet tiruan (uji kering tak mengubah sel, verifikasi gagal ⇒ tidak menghapus, notifikasi belum dibaca aman) |
 
 ---
 
@@ -61,30 +63,37 @@ Mode Live butuh deployment Apps Script (lihat `backend/SetupGuide.md`).
 
 ---
 
-## 5. Checklist SEBELUM merge (aman & cepat)
+## 5. Status merge (SUDAH SELESAI — bukti)
 
-- [ ] `npm run verify` hijau di mesin sendiri.
-- [ ] Jadikan PR #2 sebagai **draft** hanya bila masih ada perubahan; kalau tidak, biarkan siap merge.
-- [ ] Tab **Actions** di GitHub: job `verify` (check + test) harus **sukses** sebelum job `deploy`.
-- [ ] Baca ringkasan perubahan: 15 file + 3 berkas uji baru; **tidak ada perubahan skema sheet**,
-      **tidak ada migrasi data** yang wajib (arsip hanya membuat sheet `Arsip_*` saat dijalankan).
-- [ ] (Opsional, sangat disarankan) **Buat salinan spreadsheet** sebelum uji Live:
-      Google Sheets ➔ *File* ➔ *Make a copy*.
+| Pemeriksaan | Hasil |
+|---|---|
+| `npm run verify` sebelum merge | ✅ 85 uji lulus (24 API + 28 retensi/paritas + 33 simulasi arsip) |
+| CI di PR #2 | ✅ job `verify` sukses (`deploy` di-skip di PR — memang begitu) |
+| Merge PR #2 | ✅ `state = MERGED`, merge commit **`1f4a076`**, `main` = `1f4a076` |
+| Deploy GitHub Pages dari `main` | ✅ run sukses (job `deploy` **success**) |
+| Situs terbit | ✅ `js/config.js` memuat `APP_VERSION: '4.4.0'` |
+| Folder `backend/` di Pages | ✅ **404** (ID spreadsheet tidak lagi terbit) |
 
-## 6. Checklist SESUDAH merge (wajib, berurutan)
+> 6 commit ikut masuk: `b325f44`, `c6550fe`, `b111c0a`, `e838442` (v4.3) + `761a54c` (tahap 1)
+> + `a6adf47` (tahap 2). Rollback: `git revert` commit spesifik, atau redeploy versi lama
+> (Pages ➔ *Deployments*, Apps Script ➔ *Manage deployments* ➔ pilih version lama).
 
-1. **Salin `backend/Code.gs`** ke editor Apps Script (Extensions ➔ Apps Script).
-2. **Deploy versi baru:** Deploy ➔ *Manage deployments* ➔ ✏️ Edit ➔ *Version: New version* ➔ Deploy.
-   Tanpa ini aplikasi menampilkan peringatan *"backend masih versi lama"* (memang disengaja).
-3. Di editor Apps Script, jalankan **`selfTest()`** → periksa `warnings` di log Executions.
-4. Uji Mode Live: login `ustaz1` → buka dashboard (pastikan cepat) → catat 1 setoran →
-   cek santri menerima notifikasi; login `ortu1` → tes acak → evaluasi.
-5. Cek halaman Pages: `.../backend/Code.gs` harus **404** (bukti folder backend tidak terbit).
-6. Bila ada masalah: **rollback mudah** —
-   *Frontend:* Pages ➔ Deployments ➔ pilih deployment lama ➔ *Redeploy*.
-   *Backend:* Apps Script ➔ *Manage deployments* ➔ Edit ➔ pilih **version lama** ➔ Deploy.
-7. Opsional: aktifkan arsip (`ARCHIVE_AKTIF = 1` di sheet `Config`) setelah menjalankan
-   `archiveOldRows()` (uji kering) dan memeriksa angkanya.
+## 6. ⚠️ SATU-SATUNYA langkah manual yang belum dikerjakan (backend Live)
+
+Repo & situs sudah benar, tetapi **backend Live masih versi lama sampai Anda melakukan ini**:
+
+1. Buka spreadsheet ➔ **Extensions ➔ Apps Script**.
+2. **Tempel isi `quran-retention-app/backend/Code.gs`** dari `main` (versi 4.4.0) — ganti seluruh isi,
+   lalu **Simpan**.
+3. **Deploy ➔ Manage deployments ➔** ✏️ (Edit) ➔ **Version: New version** ➔ **Deploy**.
+   Tanpa langkah ini aplikasi menampilkan peringatan *"backend masih versi lama"* (memang disengaja
+   oleh pengaman versi).
+4. Jalankan **`selfTest()`** dari editor (dropdown fungsi ➔ Run) dan periksa bagian `warnings`.
+5. Uji cepat Mode Live: login `ustaz1` → dashboard harus terasa cepat → catat 1 setoran →
+   cek santri menerima notifikasi; login `ortu1` → tes acak.
+6. (Opsional) Arsip: jalankan `archiveOldRows()` = **uji kering**; bila angkanya wajar,
+   `archiveOldRows({ dryRun: false })`; nyalakan otomatis dengan `ARCHIVE_AKTIF = 1` di sheet `Config`.
+   Urutan aman lengkap ada di `backend/SetupGuide.md` bagian 5b.
 
 ---
 
