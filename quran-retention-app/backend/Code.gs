@@ -15,7 +15,7 @@
 
 // Versi backend. WAJIB dinaikkan bersamaan dengan APP_VERSION di js/config.js
 // agar frontend bisa mendeteksi "backend tertinggal" (deployment versi lama).
-const APP_VERSION = '4.3.0';
+const APP_VERSION = '4.4.0';
 
 // ID Spreadsheet default. TIDAK perlu diedit lagi di kode: nilai ini hanya
 // dipakai bila Script Property 'SPREADSHEET_ID' belum diisi.
@@ -739,7 +739,10 @@ function getConfigMap() {
     XP_BONUS_LANCAR: 5,
     XP_BONUS_RECOVERY: 15,
     SESSION_EXPIRY_JAM: 24,
-    ARCHIVE_AMBANG_BULAN: 6
+    ARCHIVE_AMBANG_BULAN: 6,
+    // 0 = arsip otomatis hanya UJI KERING (aman). Set 1 di sheet Config untuk
+    // benar-benar memindahkan riwayat lama ke sheet Arsip_*.
+    ARCHIVE_AKTIF: 0
   };
 
   for (let i = 1; i < data.length; i++) {
@@ -2230,6 +2233,384 @@ function getAyahContent(surah, ayah) {
 }
 
 // ============================================================
+// ARSIP OTOMATIS RIWAYAT LAMA (PRD Section 15 & 17)
+// ============================================================
+// Sheet histori (Murojaah, Riwayat_Tes, Notifikasi) tumbuh selamanya. Karena
+// setiap pembacaan memakai getRange, ukuran sheet = ongkos. Arsip memindahkan
+// baris lama ke sheet 'Arsip_<nama>' (atau spreadsheet arsip terpisah) sehingga
+// sheet aktif tetap ramping.
+//
+// Aturan keselamatan (penting — jangan diubah tanpa alasan):
+//   1) DEFAULT = UJI KERING. Tanpa argumen, fungsi ini hanya MELAPORKAN apa yang
+//      akan dipindahkan; tidak menulis dan tidak menghapus apa pun.
+//   2) Penghapusan hanya dilakukan SETELAH penulisan arsip terverifikasi
+//      (jumlah baris bertambah tepat sebanyak data yang ditulis).
+//   3) Notifikasi hanya diarsipkan bila Status_Baca = 'Sudah' — yang belum dibaca
+//      tidak boleh hilang dari pandangan santri.
+//   4) Seluruh operasi tulis berjalan di dalam withLock() + flush().
+//   5) Arsip otomatis pada batch malam tetap uji kering sampai pemilik sistem
+//      menyalakan Config ARCHIVE_AKTIF = 1.
+
+const PROP_LAST_ARCHIVE_RUN = 'SYNC_STATE_LAST_ARCHIVE_RUN';
+
+const ARCHIVE_SHEET_SPECS = [
+  { name: 'Murojaah', cols: 7, dateIndex: 1 },
+  { name: 'Riwayat_Tes', cols: 9, dateIndex: 1 },
+  // Notifikasi: hanya yang sudah dibaca (readIndex = kolom Status_Baca).
+  { name: 'Notifikasi', cols: 6, dateIndex: 4, onlyRead: true, readIndex: 5 }
+];
+
+/**
+ * Tanggal awal bulan N bulan sebelum sebuah tanggal (YYYY-MM-DD).
+ * Dipakai sebagai batas arsip: baris dengan tanggal < batas dianggap lama.
+ * Fungsi ini MURNI (tanpa API Google) sehingga bisa diuji unit di luar GAS.
+ *
+ * @param {string} dateStr tanggal sumber (YYYY-MM-DD)
+ * @param {number} months jumlah bulan ke belakang
+ * @returns {string} YYYY-MM-01, atau '' bila tanggal tidak valid
+ */
+function monthsAgoFrom_(dateStr, months) {
+  const m = String(dateStr || '').slice(0, 10).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return '';
+  let tahun = Number(m[1]);
+  let bulan = Number(m[2]) - (Number(months) || 0);
+  while (bulan <= 0) { bulan += 12; tahun -= 1; }
+  const bulanStr = (bulan < 10 ? '0' : '') + bulan;
+  return tahun + '-' + bulanStr + '-01';
+}
+
+/**
+ * Tentukan tujuan arsip. Bila Script Property SPREADSHEET_ID_ARSIP diisi,
+ * arsip ditulis ke spreadsheet terpisah; bila tidak, ke sheet 'Arsip_*' di
+ * spreadsheet yang sama (tidak perlu konfigurasi tambahan).
+ */
+function getArchiveTarget_() {
+  const id = readScriptProperty_('SPREADSHEET_ID_ARSIP');
+  if (id && id.length > 5) {
+    try {
+      return { ss: SpreadsheetApp.openById(id), label: 'Spreadsheet arsip terpisah (SPREADSHEET_ID_ARSIP)', external: true };
+    } catch (e) {
+      Logger.log('Spreadsheet arsip tidak bisa dibuka, memakai sheets Arsip_* lokal: ' + e);
+    }
+  }
+  return { ss: getSpreadsheet(), label: 'Sheet Arsip_* di spreadsheet yang sama', external: false };
+}
+
+/** Pastikan sheet arsip ada dan berheader sama dengan sheet sumber. */
+function ensureArchiveSheet_(ss, sourceName, cols) {
+  const archiveName = 'Arsip_' + sourceName;
+  const header = getSheet(sourceName).getRange(1, 1, 1, cols).getValues()[0];
+  let sheet = ss.getSheetByName(archiveName);
+  if (!sheet) {
+    sheet = ss.insertSheet(archiveName);
+    sheet.getRange(1, 1, 1, cols).setValues([header]);
+    sheet.setFrozenRows(1);
+    return sheet;
+  }
+  if (sheet.getLastRow() === 0) {
+    sheet.getRange(1, 1, 1, cols).setValues([header]);
+  }
+  return sheet;
+}
+
+/**
+ * Hapus baris dari BAWAH ke atas dalam blok kontigu. Menghapus dari atas akan
+ * menggeser nomor baris berikutnya; urutan ini mencegah baris salah terhapus.
+ * @param {Sheet} sheet
+ * @param {number[]} rowNumbers nomor baris sheet (1-based), urut menaik
+ */
+function deleteRowBlocks_(sheet, rowNumbers) {
+  let i = rowNumbers.length - 1;
+  while (i >= 0) {
+    const end = rowNumbers[i];
+    let start = end;
+    while (i - 1 >= 0 && rowNumbers[i - 1] === start - 1) {
+      i--;
+      start = rowNumbers[i];
+    }
+    sheet.deleteRows(start, end - start + 1);
+    i--;
+  }
+}
+
+/**
+ * Pintu masuk arsip. TANPA argumen = uji kering (aman, read-only).
+ * Pemakaian:
+ *   archiveOldRows()                          → laporan uji kering
+ *   archiveOldRows({ dryRun: false })          → benar-benar memindahkan
+ *   archiveOldRows({ bulan: 3 })               → batas arsip 3 bulan
+ */
+function archiveOldRows(options) {
+  const opts = options || {};
+  if (opts.dryRun !== false) return archiveOldRowsRun_(opts, true);
+  return withLock(function () { return archiveOldRowsRun_(opts, false); });
+}
+
+/** Implementasi inti arsip (dipanggil dari archiveOldRows). */
+function archiveOldRowsRun_(opts, dryRun) {
+  const config = getConfigMap();
+  const bulan = Number(opts.bulan || config.ARCHIVE_AMBANG_BULAN || 6);
+  const cutoff = monthsAgoFrom_(appTodayStr(), bulan);
+  if (!cutoff) {
+    return { success: false, code: 'E_UNKNOWN', message: 'Batas arsip tidak bisa dihitung dari tanggal hari ini.' };
+  }
+
+  const target = getArchiveTarget_();
+  const report = {
+    success: true,
+    dryRun: dryRun,
+    bulan: bulan,
+    cutoff: cutoff,
+    target: target.label,
+    sheets: {},
+    totalDitemukan: 0,
+    totalDiarsipkan: 0,
+    totalDihapus: 0,
+    warnings: []
+  };
+
+  for (let s = 0; s < ARCHIVE_SHEET_SPECS.length; s++) {
+    const spec = ARCHIVE_SHEET_SPECS[s];
+    let sheet;
+    try {
+      sheet = getSheet(spec.name);
+    } catch (e) {
+      // Sheet tidak ada di instalasi ini → lewati, jangan gagalkan seluruh arsip.
+      report.warnings.push('Sheet ' + spec.name + ' tidak ditemukan — dilewati.');
+      report.sheets[spec.name] = { ditemukan: 0, diarsipkan: 0, dihapus: 0, catatan: 'sheet tidak ditemukan' };
+      continue;
+    }
+    const lastRow = sheet.getLastRow();
+    if (lastRow < 2) {
+      report.sheets[spec.name] = { ditemukan: 0, diarsipkan: 0, dihapus: 0, catatan: 'sheet kosong' };
+      continue;
+    }
+
+    const rows = sheet.getRange(2, 1, lastRow - 1, spec.cols).getValues();
+    const kandidat = [];
+    for (let i = 0; i < rows.length; i++) {
+      const tgl = toDateStr(rows[i][spec.dateIndex]);
+      if (!tgl || tgl >= cutoff) continue; // tanggal kosong / masih periode aktif
+      if (spec.onlyRead && String(rows[i][spec.readIndex] || '') !== 'Sudah') continue;
+      kandidat.push({ rowNumber: i + 2, values: rows[i] });
+    }
+
+    report.totalDitemukan += kandidat.length;
+    if (kandidat.length === 0) {
+      report.sheets[spec.name] = { ditemukan: 0, diarsipkan: 0, dihapus: 0 };
+      continue;
+    }
+
+    if (dryRun) {
+      report.sheets[spec.name] = { ditemukan: kandidat.length, diarsipkan: 0, dihapus: 0, catatan: 'uji kering — tidak ada yang diubah' };
+      continue;
+    }
+
+    let archSheet;
+    try {
+      archSheet = ensureArchiveSheet_(target.ss, spec.name, spec.cols);
+    } catch (e) {
+      report.warnings.push('Gagal menyiapkan arsip ' + spec.name + ': ' + e);
+      report.sheets[spec.name] = { ditemukan: kandidat.length, diarsipkan: 0, dihapus: 0, catatan: 'dibatalkan' };
+      continue;
+    }
+
+    const values = kandidat.map(function (k) { return k.values; });
+    const sebelum = archSheet.getLastRow();
+    try {
+      archSheet.getRange(sebelum + 1, 1, values.length, spec.cols).setValues(values);
+      SpreadsheetApp.flush();
+    } catch (e) {
+      report.warnings.push('Gagal menulis arsip ' + spec.name + ': ' + e);
+      report.sheets[spec.name] = { ditemukan: kandidat.length, diarsipkan: 0, dihapus: 0, catatan: 'dibatalkan' };
+      continue;
+    }
+
+    // Verifikasi sebelum menghapus — bila tidak cocok, TIDAK ada yang dihapus.
+    const sesudah = archSheet.getLastRow();
+    if (sesudah - sebelum !== values.length) {
+      report.warnings.push('Arsip ' + spec.name + ' tidak terverifikasi (' + (sesudah - sebelum) + ' dari ' + values.length + ' baris) — penghapusan dibatalkan.');
+      report.sheets[spec.name] = { ditemukan: kandidat.length, diarsipkan: sesudah - sebelum, dihapus: 0, catatan: 'dibatalkan' };
+      continue;
+    }
+
+    const rowNumbers = kandidat.map(function (k) { return k.rowNumber; });
+    deleteRowBlocks_(sheet, rowNumbers);
+    SpreadsheetApp.flush();
+
+    report.sheets[spec.name] = { ditemukan: kandidat.length, diarsipkan: values.length, dihapus: rowNumbers.length };
+    report.totalDiarsipkan += values.length;
+    report.totalDihapus += rowNumbers.length;
+  }
+
+  writeScriptProperty_(PROP_LAST_ARCHIVE_RUN, JSON.stringify({
+    at: new Date().toISOString(),
+    dryRun: dryRun,
+    cutoff: cutoff,
+    ditemukan: report.totalDitemukan,
+    dihapus: report.totalDihapus
+  }));
+
+  if (!dryRun && report.totalDihapus > 0) bumpDashVersion_();
+  return report;
+}
+
+// ============================================================
+// DIAGNOSTIK SISTEM (read-only) — selfTest() & health_check
+// ============================================================
+
+/**
+ * Kumpulkan status sistem tanpa mengubah apa pun. Dipakai oleh selfTest()
+ * (dijalankan dari editor Apps Script) dan health_check (lewat HTTP, ustaz).
+ */
+function systemDiagnostics_() {
+  const out = {
+    appVersion: APP_VERSION,
+    timezone: APP_TIMEZONE,
+    spreadsheetId: SPREADSHEET_ID ? (SPREADSHEET_ID.slice(0, 6) + '…(disembunyikan)') : '(belum diisi)',
+    archiveTarget: getArchiveTarget_().label,
+    trigger: { installed: false, handler: 'runNightlyRetentionRecompute' },
+    lastNightlyRun: readScriptProperty_(PROP_LAST_NIGHTLY_RUN) || '(belum pernah)',
+    lastArchiveRun: readScriptProperty_(PROP_LAST_ARCHIVE_RUN) || '(belum pernah)',
+    config: {},
+    sheets: {},
+    duplikat: {},
+    warnings: []
+  };
+
+  try {
+    const triggers = ScriptApp.getProjectTriggers();
+    for (let i = 0; i < triggers.length; i++) {
+      if (triggers[i].getHandlerFunction() === 'runNightlyRetentionRecompute') out.trigger.installed = true;
+    }
+  } catch (e) {
+    out.warnings.push('Tidak bisa membaca daftar trigger: ' + e);
+  }
+  if (!out.trigger.installed) {
+    out.warnings.push('Trigger malam TIDAK terpasang: pembersihan sesi, downgrade retensi, dan arsip tidak berjalan. Jalankan installNightlyTrigger() dari editor (atau login sekali agar dipasang otomatis).');
+  }
+  if (out.lastNightlyRun === '(belum pernah)') {
+    out.warnings.push('Batch malam belum pernah tercatat berjalan.');
+  }
+
+  // Config efektif (nilai penting saja)
+  try {
+    const cfg = getConfigMap();
+    ['ARCHIVE_AMBANG_BULAN', 'ARCHIVE_AKTIF', 'SESSION_EXPIRY_JAM', 'AMBANG_SABQI_HARI',
+      'INTERVAL_CAP_MAKS_HARI', 'RECOVERY_LANCAR_BERUNTUN_DIBUTUHKAN'].forEach(function (k) {
+        out.config[k] = cfg[k];
+      });
+  } catch (e) {
+    out.warnings.push('Config tidak bisa dibaca: ' + e);
+  }
+
+  // Jumlah baris sheet kunci
+  ['Users', 'Santri', 'Target', 'Hafalan', 'Master_Hafalan', 'Murojaah', 'Riwayat_Tes',
+    'Gamifikasi', 'Badge', 'Notifikasi', 'Feedback', 'Sessions', 'Cache_Ayat'].forEach(function (name) {
+      try { out.sheets[name] = Math.max(0, getSheet(name).getLastRow() - 1); }
+      catch (e) { out.sheets[name] = -1; }
+    });
+
+  // Pemeriksaan header kolom aditif (mudah terlewat saat migrasi manual)
+  try {
+    const masterHeader = getSheet('Master_Hafalan').getRange(1, 1, 1, 12).getValues()[0];
+    if (String(masterHeader[11] || '') !== 'Consecutive_Lancar') {
+      out.warnings.push('Header Master_Hafalan kolom ke-12 bukan "Consecutive_Lancar" — Recovery Policy (Merah→Kuning 2x Lancar) tidak akan tercatat. Lihat SetupGuide bagian migrasi.');
+    }
+    const cacheHeader = getSheet('Cache_Ayat').getRange(1, 1, 1, 6).getValues()[0];
+    if (String(cacheHeader[5] || '') !== 'Teks_Indonesia') {
+      out.warnings.push('Header Cache_Ayat kolom ke-6 bukan "Teks_Indonesia" — terjemahan ayat tidak akan tersimpan.');
+    }
+  } catch (e) {
+    out.warnings.push('Pemeriksaan header gagal: ' + e);
+  }
+
+  // Duplikat data (sumber bug "data dobel" dari versi lama)
+  try {
+    const targetRows = readSheet_('Target', 6);
+    const seenTarget = {};
+    let dupTarget = 0;
+    for (let i = 0; i < targetRows.length; i++) {
+      const key = String(targetRows[i][2]) + '|' + String(targetRows[i][1]);
+      if (seenTarget[key]) dupTarget++; else seenTarget[key] = true;
+    }
+    out.duplikat.target_santri_bulan = dupTarget;
+    if (dupTarget > 0) out.warnings.push('Ada ' + dupTarget + ' baris Target kembar (santri+bulan sama) — target bisa tampil tidak konsisten.');
+
+    const masterRows = readSheet_('Master_Hafalan', 12);
+    const seenUnit = {};
+    let dupUnit = 0;
+    for (let i = 0; i < masterRows.length; i++) {
+      const key = String(masterRows[i][1]) + '|' + String(masterRows[i][2]).replace(/[^a-z0-9]/gi, '').toLowerCase() +
+        '|' + String(masterRows[i][3]) + '|' + String(masterRows[i][4]);
+      if (seenUnit[key]) dupUnit++; else seenUnit[key] = true;
+    }
+    out.duplikat.unit_hafalan = dupUnit;
+    if (dupUnit > 0) out.warnings.push('Ada ' + dupUnit + ' unit Master_Hafalan kembar (santri+surah+ayat sama) — pertimbangkan penggabungan.');
+
+    const userRows = readSheet_('Users', 6);
+    const seenUser = {};
+    let dupUser = 0;
+    for (let i = 0; i < userRows.length; i++) {
+      const key = String(userRows[i][1] || '').toLowerCase();
+      if (!key) continue;
+      if (seenUser[key]) dupUser++; else seenUser[key] = true;
+    }
+    out.duplikat.username = dupUser;
+    if (dupUser > 0) out.warnings.push('Ada ' + dupUser + ' username kembar di sheet Users.');
+  } catch (e) {
+    out.warnings.push('Pemeriksaan duplikat gagal: ' + e);
+  }
+
+  // Kesehatan sheet Sessions (paling sering jadi sumber perlambatan)
+  try {
+    const sessionRows = readSheet_('Sessions', 6);
+    const now = Date.now();
+    let expired = 0;
+    const seenToken = {};
+    let dupToken = 0;
+    for (let i = 0; i < sessionRows.length; i++) {
+      const exp = new Date(sessionRows[i][3]);
+      if (!isNaN(exp.getTime()) && exp.getTime() < now) expired++;
+      const t = String(sessionRows[i][0] || '');
+      if (t) { if (seenToken[t]) dupToken++; else seenToken[t] = true; }
+    }
+    out.sessionsExpired = expired;
+    out.duplikat.token_sesi = dupToken;
+    if (expired > 0) {
+      out.warnings.push('Ada ' + expired + ' sesi kedaluwarsa yang belum dibersihkan (dibersihkan otomatis oleh trigger malam / saat token dipakai).');
+    }
+    if (sessionRows.length > 500) {
+      out.warnings.push('Sheet Sessions berisi ' + sessionRows.length + ' baris — periksa apakah trigger malam berjalan.');
+    }
+  } catch (e) {
+    out.warnings.push('Pemeriksaan sesi gagal: ' + e);
+  }
+
+  // Ukuran sheet histori → sarankan arsip
+  const besar = Object.keys(out.sheets).filter(function (k) {
+    return ['Murojaah', 'Riwayat_Tes', 'Notifikasi', 'Cache_Ayat'].indexOf(k) !== -1 && out.sheets[k] > 5000;
+  });
+  if (besar.length > 0) {
+    out.warnings.push('Sheet histori besar (' + besar.join(', ') + ' > 5.000 baris). Jalankan archiveOldRows() untuk melihat rencana arsip (uji kering).');
+  }
+
+  return out;
+}
+
+/**
+ * Uji mandiri sistem — jalankan dari editor Apps Script (dropdown fungsi →
+ * selfTest → Run). Tidak mengubah data apa pun, aman dijalankan kapan saja.
+ * Hasil lengkap (termasuk rencana arsip) dicatat ke Executions log.
+ */
+function selfTest() {
+  const report = systemDiagnostics_();
+  report.arsipRencana = archiveOldRows({ dryRun: true });
+  Logger.log(JSON.stringify(report, null, 2));
+  return report;
+}
+
+// ============================================================
 // NIGHTLY CRON TRIGGER (RECOMPUTE & CLEANUP)
 // ============================================================
 
@@ -2291,11 +2672,31 @@ function runNightlyRetentionRecompute() {
   }
   bumpDashVersion_(); // data berubah -> cache dashboard dibuang
 
+  // Arsip riwayat lama. Aman secara default: hanya UJI KERING sampai pemilik
+  // sistem menyetel Config ARCHIVE_AKTIF = 1 (lihat komentar archiveOldRows).
+  let archiveInfo = null;
+  try {
+    const cfgArsip = getConfigMap();
+    const arsipAktif = String(cfgArsip.ARCHIVE_AKTIF || '0') === '1';
+    const hasilArsip = archiveOldRows({ dryRun: !arsipAktif });
+    archiveInfo = (hasilArsip && hasilArsip.success === false)
+      ? { error: hasilArsip.code || 'E_BUSY' } // mis. lock dipakai user: coba lagi malam berikutnya
+      : {
+        dryRun: hasilArsip.dryRun,
+        cutoff: hasilArsip.cutoff,
+        ditemukan: hasilArsip.totalDitemukan,
+        dihapus: hasilArsip.totalDihapus
+      };
+  } catch (e) {
+    Logger.log('arsip otomatis gagal (diabaikan): ' + e);
+    archiveInfo = { error: String(e) };
+  }
+
   // Catat jejak eksekusi agar healthCheck() bisa membuktikan batch benar-benar
   // berjalan (dulu tidak ada jejak apa pun, sehingga "trigger lupa dipasang"
   // tidak terdeteksi sampai sistem terasa lambat).
   writeScriptProperty_(PROP_LAST_NIGHTLY_RUN, new Date().toISOString());
-  return { success: true, ranAt: readScriptProperty_(PROP_LAST_NIGHTLY_RUN) };
+  return { success: true, ranAt: readScriptProperty_(PROP_LAST_NIGHTLY_RUN), archive: archiveInfo };
 }
 
 // Install Trigger otomatis setiap jam 01:00 malam
@@ -2353,48 +2754,14 @@ function ensureNightlyTrigger() {
  * Panggil dari editor Apps Script, atau lewat action 'health_check' (khusus ustaz).
  */
 function healthCheck(session) {
+  // Satu sumber diagnostik dengan selfTest(): versi, trigger, ukuran sheet,
+  // duplikat data, dan peringatan tindakan yang perlu dilakukan.
   if (session && session.role !== 'ustaz' && session.role !== 'admin') {
     return { success: false, code: 'E_FORBIDDEN', message: 'Akses khusus Ustaz' };
   }
-
-  const out = {
-    success: true,
-    appVersion: APP_VERSION,
-    timezone: APP_TIMEZONE,
-    spreadsheetId: SPREADSHEET_ID ? (SPREADSHEET_ID.slice(0, 6) + '…(tersembunyi)') : '(belum diisi)',
-    trigger: { installed: false, handler: 'runNightlyRetentionRecompute' },
-    lastNightlyRun: readScriptProperty_(PROP_LAST_NIGHTLY_RUN) || '(belum pernah)',
-    sheets: {},
-    warnings: []
-  };
-
-  try {
-    const triggers = ScriptApp.getProjectTriggers();
-    for (let i = 0; i < triggers.length; i++) {
-      if (triggers[i].getHandlerFunction() === 'runNightlyRetentionRecompute') {
-        out.trigger.installed = true;
-      }
-    }
-  } catch (e) {
-    out.warnings.push('Tidak bisa membaca daftar trigger: ' + e);
-  }
-  if (!out.trigger.installed) {
-    out.warnings.push('Trigger malam TIDAK terpasang: sheet Sessions & downgrade retensi tidak berjalan. Buka editor Apps Script lalu jalankan installNightlyTrigger().');
-  }
-  if (out.lastNightlyRun === '(belum pernah)') {
-    out.warnings.push('Batch malam belum pernah tercatat berjalan.');
-  }
-
-  const sheetNames = ['Santri', 'Master_Hafalan', 'Murojaah', 'Riwayat_Tes', 'Notifikasi', 'Sessions', 'Cache_Ayat'];
-  sheetNames.forEach(function (name) {
-    try {
-      out.sheets[name] = getSheet(name).getLastRow();
-    } catch (e) {
-      out.sheets[name] = -1;
-    }
-  });
-
-  return out;
+  const report = systemDiagnostics_();
+  report.success = true;
+  return report;
 }
 
 // ============================================================
@@ -2421,7 +2788,8 @@ function setupInitialDatabase() {
     ['XP_BONUS_LANCAR', 5, 'Bonus XP hasil lancar'],
     ['XP_BONUS_RECOVERY', 15, 'Bonus XP pemulihan merah ke kuning'],
     ['SESSION_EXPIRY_JAM', 24, 'Masa berlaku token sesi (jam)'],
-    ['ARCHIVE_AMBANG_BULAN', 6, 'Ambang waktu arsip riwayat']
+    ['ARCHIVE_AMBANG_BULAN', 6, 'Ambang waktu arsip riwayat'],
+    ['ARCHIVE_AKTIF', 0, '1 = arsip otomatis aktif; 0 = uji kering saja'],
   ];
   configs.forEach(row => configSheet.appendRow(row));
 

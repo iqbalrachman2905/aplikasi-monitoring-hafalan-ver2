@@ -72,7 +72,7 @@ Proyek ini tanpa build step & tanpa dependency. Cukup jalankan dev server statis
 
 ```bash
 npm start        # dev server statis, default di http://localhost:8080/
-npm run verify   # cek sintaks + paritas mock↔backend + 24 uji lapisan API
+npm run verify   # cek sintaks + paritas + 85 uji otomatis (API, retensi, arsip)
 ```
 
 Atau tanpa Node: `cd quran-retention-app && python -m http.server 8080`.
@@ -147,6 +147,20 @@ const APP_CONFIG = {
 *Form login juga memvalidasi password (bukan hanya username). Tombol 1-Click Demo Switcher pada halaman login & bilah navigasi tetap tersedia untuk eksplorasi cepat; tombol tersebut otomatis beralih ke Mode Demo agar data spreadsheet asli tidak tercampur data simulasi.*
 
 ---
+
+## 🗄️ Perbaikan v4.4 (Performa & Perawatan Data)
+
+| Area | Perubahan |
+|---|---|
+| ⚡ Dashboard | `Master_Hafalan` dibaca **sekali** lalu diindeks per santri: dashboard Ustaz dari **O(santri × baris)** menjadi **O(baris)**. Jumlah `getDataRange()` turun **34 → 3** (kolom minimal lewat `readSheet_`) |
+| 🗃️ Sesi & cache | `validateSession` dilayani **`CacheService`** (dulu membaca seluruh sheet `Sessions` di setiap request); dashboard memakai TTL 20–30 dtk dengan **versi data** yang naik setiap penulisan, jadi data setelah menyimpan selalu langsung terlihat |
+| 🚪 Logout | Tidak lagi `deleteRow` (mahal) — token ditandai kedaluwarsa + dibuang dari cache |
+| 📦 Arsip otomatis | `archiveOldRows()` memindahkan riwayat > `ARCHIVE_AMBANG_BULAN` (default 6 bulan) dari `Murojaah`, `Riwayat_Tes`, dan `Notifikasi` (khusus yang **sudah dibaca**) ke sheet `Arsip_*`. **Default uji kering**, penghapusan hanya setelah penulisan arsip terverifikasi, dan operasinya ber-lock |
+| 🩺 `selfTest()` | Diagnostik read-only dari editor Apps Script: versi, trigger, ukuran sheet, header kolom aditif, **duplikat data** (target/unit/username/token), sesi kedaluwarsa, plus rencana arsip |
+| 🧪 Uji retensi & arsip | `tools/test-retention.cjs` (28 kasus: retensi, paritas backend↔Mode Demo, kolom arsip) + `tools/test-archive.cjs` (33 kasus: arsip dijalankan di atas Spreadsheet tiruan — uji kering tak mengubah data, verifikasi gagal = tidak menghapus, notifikasi belum dibaca aman): interval naik/turun, cap 60 hari, recovery Merah→Kuning 2× Lancar, data rusak — **sekaligus membuktikan Mode Demo identik dengan backend** |
+| 🛡️ Penjaga CI | CI menolak bila dashboard kembali memakai `getDataRange()`, bila `validateSession` tidak memakai cache sesi, atau bila aturan keselamatan arsip dilanggar (default uji kering, verifikasi sebelum hapus, notifikasi belum dibaca tidak diarsipkan) |
+
+> Mengaktifkan arsip otomatis: isi `ARCHIVE_AKTIF` = `1` di sheet `Config`. Sebelum itu, jalankan `archiveOldRows()` dari editor untuk melihat **rencana** arsip (uji kering, tanpa mengubah data).
 
 ## 🛡️ Perbaikan v4.3 (Keandalan, Keamanan Data & Anti-Fitur-Hilang)
 

@@ -112,6 +112,33 @@ Agar Frontend (GitHub Pages) dapat berkomunikasi dengan backend:
 
 ---
 
+## 5b. Arsip Riwayat Lama (v4.4) — aman secara default
+
+Sheet histori (`Murojaah`, `Riwayat_Tes`, `Notifikasi`) tumbuh terus; karena setiap
+pembacaan memakai `getRange`, ukuran sheet = ongkos. `archiveOldRows()` memindahkan
+baris lama ke sheet `Arsip_*` pada spreadsheet yang sama (atau ke spreadsheet arsip
+terpisah bila Script Property `SPREADSHEET_ID_ARSIP` diisi).
+
+**Urutan aman yang disarankan:**
+1. **Backup dulu:** Google Sheets ➔ *File* ➔ *Make a copy* (kebiasaan baik sebelum
+   menyentuh data historis).
+2. Dari editor Apps Script, jalankan **`selfTest()`** — ia melaporkan ukuran sheet,
+   duplikat data, status trigger, dan **rencana arsip** (uji kering). Tidak ada yang
+   diubah oleh `selfTest()`.
+3. Jalankan **`archiveOldRows()`** tanpa argumen → tetap **uji kering**: ia hanya
+   menunjukkan berapa baris yang akan dipindahkan per sheet. Periksa angkanya.
+4. Bila angkanya wajar, jalankan **`archiveOldRows({ dryRun: false })`** untuk
+   benar-benar memindahkan. Baris baru dihapus dari sheet aktif **hanya setelah**
+   penulisan arsip terverifikasi.
+5. Agar berjalan otomatis tiap malam: tambahkan baris `ARCHIVE_AKTIF` = `1` pada
+   sheet `Config`. Selama `0`/tidak ada, batch malam hanya melaporkan (uji kering).
+
+> ⚠️ Notifikasi yang **belum dibaca** tidak pernah diarsipkan, sehingga pesan untuk
+> santri tidak hilang dari pandangan. Batas usia arsip diatur `ARCHIVE_AMBANG_BULAN`
+> (default 6 bulan). Untuk pengujian, `archiveOldRows({ bulan: 1, dryRun: false })`.
+
+---
+
 ## 6. Akun Bawaan (Default Demo Credentials)
 
 | Role | Username | Password | Keterangan |
@@ -156,9 +183,14 @@ Agar Frontend (GitHub Pages) dapat berkomunikasi dengan backend:
    otomatis memuat ulang data untuk memastikan dan **tidak** menyarankan mengulang.
    Bila backend masih versi lama (tanpa pengaman anti-dobel), jangan mengulang
    perintah sebelum memeriksa daftar/riwayat.
-10. **Sheet `Sessions` membengkak / login melambat** → jalankan `healthCheck`:
-    bila trigger tidak terpasang, jalankan `installNightlyTrigger`. Token
-    kedaluwarsa juga dibersihkan otomatis saat ditemukan (lazy cleanup).
+10. **Sheet `Sessions` membengkak / login melambat** → jalankan `healthCheck` atau
+    `selfTest`: bila trigger tidak terpasang, jalankan `installNightlyTrigger`.
+    Token kedaluwarsa juga dibersihkan otomatis saat ditemukan (lazy cleanup).
+11. **Ingin memastikan data tidak dobel/rusak** → jalankan **`selfTest()`** dari editor
+    Apps Script. Laporannya memuat: ukuran tiap sheet, header kolom aditif
+    (`Consecutive_Lancar`, `Teks_Indonesia`), duplikat `Target`/`Master_Hafalan`/
+    `Users`/token sesi, jumlah sesi kedaluwarsa, status trigger + `lastNightlyRun`,
+    serta rencana arsip (uji kering).
 
 ### Cara mengecek performa
 1. Buka Apps Script ➔ **Executions**: lihat durasi & error tiap pemanggilan.

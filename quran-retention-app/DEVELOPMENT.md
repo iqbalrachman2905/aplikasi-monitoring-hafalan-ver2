@@ -4,7 +4,7 @@ Dokumen kerja untuk **Aplikasi Monitoring Hafalan Al-Qur'an Berbasis Retensi**.
 Berisi cara menjalankan, peta arsitektur, catatan perbaikan bug, dan checklist
 pengembangan (sudah selesai maupun rencana).
 
-> Versi dokumen: 4.2.0 • Terakhir diperbarui: 30 September 2026
+> Versi dokumen: 4.4.0 • Terakhir diperbarui: 1 Oktober 2026
 
 ---
 
@@ -47,8 +47,8 @@ cd quran-retention-app && python -m http.server 8080
 
 ### Verifikasi sebelum commit
 ```bash
-npm run check   # sintaks 10 file JS + Code.gs + paritas mock↔backend
-npm test        # 24 uji lapisan API (mock, taksonomi error, anti-data-dobel)
+npm run check   # sintaks 10 file JS + Code.gs + paritas mock↔backend + penjaga performa/arsip
+npm test        # 24 uji API + 28 uji retensi/paritas + 33 uji simulasi arsip = 85 uji
 npm run verify  # keduanya sekaligus
 ```
 
@@ -215,6 +215,21 @@ aplikasi-monitoring-hafalan/
 | 34 | **Tidak bisa memastikan deployment backend terbaru** | "Sudah dibenerin tapi masih error" | ✅ `appVersion` + `capabilities` di setiap respons; frontend memperingatkan backend tertinggal |
 | 35 | **Detail error internal dikirim ke klien** (`error.toString()`) | Kebocoran informasi | ✅ Tidak lagi dikirim (aktifkan Script Property `DEBUG_ERRORS=1` bila perlu) |
 
+### 🆕 Perbaikan v4.4 — Performa Baca, Arsip Aman & Diagnostik
+
+| # | Masalah | Dampak | Status |
+|---|---|---|---|
+| 36 | **Dashboard membaca ulang seluruh sheet per santri** (`ustazGetDashboard` memindai `Master_Hafalan` untuk tiap santri + sekali lagi untuk progres target) | O(santri × baris) → makin lambat seiring bertambahnya santri & setoran | ✅ `buildMasterIndex_()`: satu kali baca lalu diindeks per santri (dipakai Ustaz, Ortu, generator misi, tes acak, detail santri) |
+| 37 | **`getDataRange()` 34×** (termasuk seluruh grid kolom kosong) | Kuota & latensi terbuang | ✅ `readSheet_(nama, kolom)` dengan kolom minimal → sisa 3 pemanggilan (hanya sheet `Config`) |
+| 38 | **`validateSession` membaca seluruh sheet Sessions di setiap request** (termasuk 3–4 panggilan ayat per kartu flashcard) | Biaya tetap besar per request | ✅ Dilayani `CacheService` (TTL mengikuti masa berlaku token; dihangatkan saat login, dibuang saat logout) + lazy cleanup |
+| 39 | **Dashboard selalu dihitung dari nol** | Karena itu dulu terasa lambat saat ramai | ✅ Cache 20–30 dtk + `dashVersion_()` yang naik setiap penulisan berhasil (data setelah menyimpan tetap segar) |
+| 40 | **`logoutUser` memakai `deleteRow`** | Mahal (menggeser seluruh baris di bawahnya) | ✅ Token ditandai kedaluwarsa + dibuang dari cache; pembersihan fisik oleh batch malam |
+| 41 | **`ARCHIVE_AMBANG_BULAN` tidak pernah dipakai** (PRD §15 menjanjikan arsip; riwayat tumbuh selamanya) | Sheet historis makin besar → pembacaan makin lambat | ✅ `archiveOldRows()` dengan **default uji kering**, verifikasi tulis-baru-hapus, hapus blok dari bawah, dan hanya notifikasi **sudah dibaca** yang diarsipkan |
+| 42 | **Tidak ada cara memeriksa kesehatan data** | Duplikat target/unit & sesi menumpuk tidak terdeteksi | ✅ `selfTest()` / `healthCheck()`: trigger, ukuran sheet, header kolom aditif, duplikat, sesi kedaluwarsa, rencana arsip |
+| 43 | **Logika retensi diduplikasi tanpa uji** | Bisa "drift" seperti bug feedback v4.2 | ✅ `tools/test-retention.cjs` mengekstrak kedua implementasi dari sumbernya dan membandingkan hasilnya untuk 16 kasus |
+| 44 | **CI tidak menjaga performa & keselamatan arsip** | Optimasi/aturan mudah hilang saat pengembangan berikutnya | ✅ Penjaga baru di `check-api-parity.cjs` (8 kelompok pemeriksaan) |
+| 45 | **Logika arsip belum pernah diuji pada data nyata** | Salah kolom/hapus dari atas = kehilangan data historis | ✅ `tools/test-archive.cjs` menjalankan fungsi asli `archiveOldRows` di atas **Spreadsheet tiruan** (33 kasus): uji kering tak mengubah sel, verifikasi gagal = penghapusan dibatalkan, notifikasi belum dibaca aman, baris tepat di cutoff tidak ikut |
+
 ### 🔜 Rencana Pengembangan Berikutnya (yang akan dikerjakan)
 
 Prioritas dikelompokkan per gelombang kerja. Estimasi relatif: S = kecil,
@@ -240,8 +255,13 @@ M = sedang, L = besar.
   tanggal) sebagai pertahanan kedua di luar `requestId` *(M)*
 - [ ] **Broadcast & arsip** — tetap N baris (keputusan: skema Notifikasi tidak diubah),
   sehingga penghematannya lewat **arsip/pemangkasan otomatis** riwayat lama *(S)*
+- [x] **Uji unit retention engine + paritas Mode Demo** (`tools/test-retention.cjs` — 28 kasus) *(S)*
+- [x] **Diagnostik mandiri** `selfTest()` — dijalankan dari editor Apps Script *(S)*
+- [x] **Arsip otomatis riwayat lama + simulasi keselamatannya** (`archiveOldRows`, `tools/test-archive.cjs` — 33 kasus) *(M)*
 - [ ] **`get_ayah_range`** — 1 fetch untuk banyak ayat + susun flashcard paralel
   (sekarang 3–4 request berurutan per kartu) *(M)*
+- [ ] **Idempotensi tingkat bisnis** — upsert murojaah per (santri, jenis, unit, tanggal) *(M)*
+- [ ] **Rate limit login** — delay progresif setelah N gagal + sheet `Audit` *(S)*
 - [ ] **Arsip otomatis riwayat lama** — pindahkan baris `Hafalan`/`Murojaah`/`Notifikasi`
   lebih tua dari `ARCHIVE_AMBANG_BULAN` ke spreadsheet arsip via cron malam *(M)*
 - [ ] **Hardening token & brute-force login** — penundaan progresif setelah N gagal

@@ -165,6 +165,57 @@ if (!/sess:/.test(validateBody)) {
   errors.push('validateSession tidak memakai cache sesi — setiap request akan membaca sheet Sessions.');
 }
 
+// --- 8. penjaga keselamatan ARSIP (data tidak boleh hilang tanpa verifikasi) --
+const archiveBody = functionBody(CODE_GS, 'archiveOldRows');
+if (!archiveBody) {
+  errors.push('Fungsi archiveOldRows tidak ditemukan — arsip riwayat lama tidak tersedia.');
+} else if (!/opts\.dryRun !== false|dryRun !== false/.test(archiveBody)) {
+  errors.push('archiveOldRows TIDAK default uji kering — menjalankan fungsi ini dari editor bisa menghapus data tanpa sengaja.');
+}
+
+const archiveRun = functionBody(CODE_GS, 'archiveOldRowsRun_') || '';
+if (!archiveRun) {
+  errors.push('archiveOldRowsRun_ tidak ditemukan.');
+} else {
+  if (!/sesudah - sebelum !== values\.length/.test(archiveRun)) {
+    errors.push('arsip tidak memverifikasi jumlah baris arsip sebelum menghapus — risiko data hilang permanen.');
+  }
+  const delIdx = archiveRun.indexOf('deleteRowBlocks_');
+  const verifyIdx = archiveRun.indexOf('sesudah - sebelum !== values.length');
+  if (delIdx < 0) {
+    errors.push('arsip tidak memakai deleteRowBlocks_ (penghapusan dari bawah ke atas).');
+  } else if (verifyIdx < 0 || verifyIdx > delIdx) {
+    errors.push('penghapusan baris terjadi SEBELUM verifikasi arsip — urutan ini berbahaya.');
+  }
+  if (!/OnlyRead|onlyRead/.test(archiveRun)) {
+    errors.push('arsip tidak membedakan notifikasi yang belum dibaca — pesan belum dibaca bisa hilang.');
+  }
+}
+
+const archiveSpecs = (CODE_GS.match(/ARCHIVE_SHEET_SPECS = \[([\s\S]*?)\];/) || [])[1] || '';
+if (!/onlyRead: true/.test(archiveSpecs)) {
+  errors.push('spesifikasi arsip Notifikasi wajib memakai onlyRead: true (hanya arsipkan yang sudah dibaca).');
+}
+
+const nightlyBody = functionBody(CODE_GS, 'runNightlyRetentionRecompute') || '';
+if (!/archiveOldRows/.test(nightlyBody)) {
+  errors.push('batch malam tidak memanggil arsip — riwayat lama tidak akan pernah dipangkas.');
+}
+if (!/ARCHIVE_AKTIF/.test(CODE_GS)) {
+  errors.push('Config ARCHIVE_AKTIF tidak ada — arsip otomatis tidak bisa dikendalikan dengan aman.');
+}
+
+// selfTest wajib ada dan read-only (tidak boleh menulis/menghapus)
+const selfTestBody = functionBody(CODE_GS, 'selfTest');
+if (!selfTestBody) {
+  errors.push('selfTest() tidak ditemukan — pemilik sistem tidak punya cara memeriksa kesehatan data.');
+} else if (/deleteRow|setValue|appendRow/.test(selfTestBody)) {
+  errors.push('selfTest() tidak boleh menulis/menghapus data — harus murni diagnostik.');
+}
+if (!/selfTest|systemDiagnostics_/.test(CODE_GS)) {
+  errors.push('diagnostik sistem tidak ditemukan.');
+}
+
 // --- laporan ---------------------------------------------------------------
 warnings.forEach(w => console.log(`  ! ${w}`));
 if (errors.length === 0) {
