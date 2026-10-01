@@ -68,14 +68,29 @@ const Auth = {
       } else {
         // TIDAK ada fallback login tanpa alternatif kredensial: bila server
         // menolak, login harus gagal (mencegah bypass autentikasi).
+        const code = res.code || '';
+
+        // Server sibuk BUKAN masalah kredensial maupun koneksi: user cukup
+        // menunggu lalu mencoba lagi (jangan diarahkan ke Mode Demo).
+        if (code === 'E_BUSY') {
+          UI.toast(res.message || 'Server sedang sibuk membuat sesi. Coba lagi sebentar.', 'gold', 6000);
+          return false;
+        }
+
+        // Kredensial salah / data tidak lengkap: pesan apa adanya dari server.
+        if (code === 'E_AUTH' || code === 'E_VALIDATION' || code === 'E_FORBIDDEN') {
+          UI.toast(res.message || 'Login gagal, periksa username/password', 'error', 5000);
+          return false;
+        }
+
         let msg = res.message || 'Login gagal, periksa username/password';
-        // Kegagalan koneksi di Mode Live bukan soal kredensial — beri jalan
-        // keluar agar pengguna tidak buntu: sarankan Mode Demo.
+        // Kegagalan koneksi/deployment di Mode Live bukan soal kredensial —
+        // beri jalan keluar agar pengguna tidak buntu: sarankan Mode Demo.
         if (res.offline) {
-          msg = (res.message || 'Gagal terhubung ke server (Mode Live).')
-            + ' Klik "Gunakan Mode Demo" di bawah untuk masuk dengan akun uji.';
+          msg += ' Klik "Gunakan Mode Demo" di bawah untuk masuk dengan akun uji.';
           if (typeof App !== 'undefined' && App.showLoginModeHint) App.showLoginModeHint();
         }
+        console.warn(`[Auth] Login gagal. kode=${code || '(tidak ada)'} pesan=${res.message || '-'}`);
         UI.toast(msg, 'error', 6000);
         return false;
       }

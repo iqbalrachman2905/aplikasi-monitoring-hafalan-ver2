@@ -4,7 +4,7 @@ Dokumen kerja untuk **Aplikasi Monitoring Hafalan Al-Qur'an Berbasis Retensi**.
 Berisi cara menjalankan, peta arsitektur, catatan perbaikan bug, dan checklist
 pengembangan (sudah selesai maupun rencana).
 
-> Versi dokumen: 4.2.0 • Terakhir diperbarui: 30 September 2026
+> Versi dokumen: 4.4.0 • Terakhir diperbarui: 1 Oktober 2026
 
 ---
 
@@ -32,7 +32,8 @@ Google Apps Script + Google Sheets.
 
 ### Menjalankan server lokal
 ```bash
-npm start          # menjalankan tools/serve.cjs (port 8080)
+npm start          # menjalankan tools/serve.cjs (port 8080, bind 0.0.0.0)
+npm run verify     # cek sintaks + paritas API + uji lapisan API (wajib sebelum commit)
 ```
 Buka **http://127.0.0.1:8080/**
 
@@ -44,9 +45,11 @@ cd quran-retention-app && python -m http.server 8080
 > ⚠️ Jangan membuka `index.html` lewat `file://` untuk pengujian serius;
 > sebagian browser membatasi `localStorage`/fetch pada protokol file.
 
-### Cek sintaks semua modul JS
+### Verifikasi sebelum commit
 ```bash
-npm run check
+npm run check   # sintaks 10 file JS + Code.gs + paritas mock↔backend + penjaga performa/arsip
+npm test        # 24 uji API + 28 uji retensi/paritas + 33 uji simulasi arsip = 85 uji
+npm run verify  # keduanya sekaligus
 ```
 
 ### Akun uji (Mode Demo)
@@ -192,15 +195,73 @@ aplikasi-monitoring-hafalan/
 - [x] **v4.2:** perbaikan kolom cache ayat + stale refetch + guard `SETUP_SECRET` default
 - [x] **v4.2:** lock & flush untuk broadcast/notifikasi, batch-delete sesi expired, notifikasi tes ortu di Mode Demo disamakan dengan backend
 
+### 🆕 Perbaikan v4.3 — Keandalan & Anti-Kegagalan-Senyap
+
+| # | Masalah | Dampak | Status |
+|---|---|---|---|
+| 21 | **Feedback Ustaz tidak sampai ke Santri** — `ustazSendFeedback` menulis ke sheet `Feedback` yang tak pernah dibaca; mock menulis ke `notifications` sehingga Mode Demo tampak berhasil | Fitur komunikasi hilang di Mode Live | ✅ Ditulis ke **Notifikasi** + tetap diarsipkan di `Feedback`; dijaga uji paritas |
+| 22 | **Mock `default` = `success:true`** | Aksi yang belum ada tampak berhasil; menutupi bug #21 | ✅ `success:false` + `unknownAction:true` + `console.warn` |
+| 23 | **Celah otorisasi:** cek kelompok hanya di `ustazGetSantriDetail` | Ustaz mana pun bisa menulis setoran/target/feedback untuk santri di luar kelompoknya (IDOR) | ✅ Cek kelompok di **setoran, target, feedback**; **broadcast dibatasi kelompok** |
+| 24 | **Timeout seragam 8 dtk** padahal lock server bisa 45 dtk | "Putus palsu" hampir pasti saat antrean; user klik ulang | ✅ Timeout per aksi (15/25/12 dtk) + tunggu lock server diturunkan (±10 dtk) |
+| 25 | **Satu pesan error untuk semua kegagalan** | Salah diagnosis (timeout dianggap koneksi putus) | ✅ Taksonomi kode error `E_OFFLINE/E_TIMEOUT/E_DEPLOY/E_CONTRACT/E_AUTH/E_FORBIDDEN/E_BUSY/E_UPSTREAM/E_VALIDATION` |
+| 26 | **Retry tanpa idempotensi** | Data dobel (XP, baris murojaah/notifikasi) | ✅ `requestId` per niat + `withIdempotency()` (CacheService 10 menit); percobaan ulang otomatis hanya bila backend mendukung |
+| 27 | **Status simpan "belum pasti" tidak ditangani** | User mengulang tindakan yang mungkin sudah tersimpan | ✅ `uncertain:true` → modal ditutup + data dimuat ulang + pesan jelas |
+| 28 | **Klik ganda pada tombol simpan** | Murojaah/setoran tercatat 2x | ✅ `UI.runOnce()` / `UI.busy` di semua aksi tulis dashboard |
+| 29 | **Endpoint tulis tanpa lock** (`ustazSendFeedback`, `ortuSendApresiasi`, `santriSubmitFlashcard`) & cache ayat `appendRow` tanpa lock | Tulisan bisa hilang; baris cache kembar | ✅ `withLock()` + `flush()` + tulis-cache dengan cek ulang |
+| 30 | **`installNightlyTrigger()` tidak pernah dipanggil** | `Sessions` tak pernah dibersihkan → `validateSession` makin lambat; downgrade Hijau→Kuning tidak jalan | ✅ `ensureNightlyTrigger()` saat login + lazy cleanup token kedaluwarsa + `healthCheck()` |
+| 31 | **Endpoint destruktif `setup_database` via HTTP** | Risiko 14 sheet terhapus | ✅ Dihapus; setup hanya dari editor Apps Script |
+| 32 | **`backend/` ikut terbit ke GitHub Pages** | ID spreadsheet & panduan setup publik | ✅ Artifact Pages kini mengecualikan `backend/`, `*.md`, `*.txt` |
+| 33 | **CI hanya deploy, tanpa verifikasi** | Regresi lolos ke produksi | ✅ Job `verify`: `npm run check` + `npm test` sebelum deploy |
+| 34 | **Tidak bisa memastikan deployment backend terbaru** | "Sudah dibenerin tapi masih error" | ✅ `appVersion` + `capabilities` di setiap respons; frontend memperingatkan backend tertinggal |
+| 35 | **Detail error internal dikirim ke klien** (`error.toString()`) | Kebocoran informasi | ✅ Tidak lagi dikirim (aktifkan Script Property `DEBUG_ERRORS=1` bila perlu) |
+
+### 🆕 Perbaikan v4.4 — Performa Baca, Arsip Aman & Diagnostik
+
+| # | Masalah | Dampak | Status |
+|---|---|---|---|
+| 36 | **Dashboard membaca ulang seluruh sheet per santri** (`ustazGetDashboard` memindai `Master_Hafalan` untuk tiap santri + sekali lagi untuk progres target) | O(santri × baris) → makin lambat seiring bertambahnya santri & setoran | ✅ `buildMasterIndex_()`: satu kali baca lalu diindeks per santri (dipakai Ustaz, Ortu, generator misi, tes acak, detail santri) |
+| 37 | **`getDataRange()` 34×** (termasuk seluruh grid kolom kosong) | Kuota & latensi terbuang | ✅ `readSheet_(nama, kolom)` dengan kolom minimal → sisa 3 pemanggilan (hanya sheet `Config`) |
+| 38 | **`validateSession` membaca seluruh sheet Sessions di setiap request** (termasuk 3–4 panggilan ayat per kartu flashcard) | Biaya tetap besar per request | ✅ Dilayani `CacheService` (TTL mengikuti masa berlaku token; dihangatkan saat login, dibuang saat logout) + lazy cleanup |
+| 39 | **Dashboard selalu dihitung dari nol** | Karena itu dulu terasa lambat saat ramai | ✅ Cache 20–30 dtk + `dashVersion_()` yang naik setiap penulisan berhasil (data setelah menyimpan tetap segar) |
+| 40 | **`logoutUser` memakai `deleteRow`** | Mahal (menggeser seluruh baris di bawahnya) | ✅ Token ditandai kedaluwarsa + dibuang dari cache; pembersihan fisik oleh batch malam |
+| 41 | **`ARCHIVE_AMBANG_BULAN` tidak pernah dipakai** (PRD §15 menjanjikan arsip; riwayat tumbuh selamanya) | Sheet historis makin besar → pembacaan makin lambat | ✅ `archiveOldRows()` dengan **default uji kering**, verifikasi tulis-baru-hapus, hapus blok dari bawah, dan hanya notifikasi **sudah dibaca** yang diarsipkan |
+| 42 | **Tidak ada cara memeriksa kesehatan data** | Duplikat target/unit & sesi menumpuk tidak terdeteksi | ✅ `selfTest()` / `healthCheck()`: trigger, ukuran sheet, header kolom aditif, duplikat, sesi kedaluwarsa, rencana arsip |
+| 43 | **Logika retensi diduplikasi tanpa uji** | Bisa "drift" seperti bug feedback v4.2 | ✅ `tools/test-retention.cjs` mengekstrak kedua implementasi dari sumbernya dan membandingkan hasilnya untuk 16 kasus |
+| 44 | **CI tidak menjaga performa & keselamatan arsip** | Optimasi/aturan mudah hilang saat pengembangan berikutnya | ✅ Penjaga baru di `check-api-parity.cjs` (8 kelompok pemeriksaan) |
+| 45 | **Logika arsip belum pernah diuji pada data nyata** | Salah kolom/hapus dari atas = kehilangan data historis | ✅ `tools/test-archive.cjs` menjalankan fungsi asli `archiveOldRows` di atas **Spreadsheet tiruan** (33 kasus): uji kering tak mengubah sel, verifikasi gagal = penghapusan dibatalkan, notifikasi belum dibaca aman, baris tepat di cutoff tidak ikut |
+
 ### 🔜 Rencana Pengembangan Berikutnya (yang akan dikerjakan)
 
 Prioritas dikelompokkan per gelombang kerja. Estimasi relatif: S = kecil,
 M = sedang, L = besar.
 
-#### 🌊 Gelombang 1 — Stabilisasi & fondasi data *(prioritas tertinggi)*
-- [ ] **Uji unit otomatis untuk retention engine & competency scoring** — runner
-  `node tools/test-retention.cjs` tanpa dependency; kasus uji: interval naik/turun,
-  recovery Merah→Kuning 2× Lancar, cap 60 hari, streak 1×/hari *(M)*
+#### 🌊 Gelombang 1 — Stabilisasi & fondasi data *(sedang dikerjakan)*
+- [x] **Uji otomatis lapisan API + paritas mock↔backend** — `npm test`
+  (`tools/test-api.cjs`, 24 kasus) & `tools/check-api-parity.cjs` (6 penjaga
+  regresi: feedback→Notifikasi, mock default, setup HTTP, idempotency, dll) *(S)*
+- [ ] **Uji unit retention engine** — runner `node tools/test-retention.cjs`;
+  kasus uji: interval naik/turun, recovery Merah→Kuning 2× Lancar, cap 60 hari,
+  streak 1×/hari *(M)*
+- [x] **Indeks sekali baca (`buildMasterIndex_`)** — dashboard Ustaz dari
+  O(santri × baris) menjadi O(baris): Master_Hafalan dibaca sekali lalu
+  dikelompokkan per santri *(M)*
+- [x] **Kolom minimal di `readSheet_()`** — jumlah `getDataRange()` turun dari
+  34 → 3 (sisanya hanya `Config` yang memang kecil); termasuk di jalur tulis
+  (setoran, target, notifikasi, cache ayat) *(S)*
+- [x] **Sesi & dashboard berbasis `CacheService`** — `validateSession` dilayani
+  cache (TTL mengikuti masa berlaku token), dashboard pakai TTL 20–30 dtk dengan
+  versi data yang naik setiap penulisan, jadi tulisan selalu langsung terlihat *(S)*
+- [ ] **Idempotensi tingkat bisnis** — upsert murojaah per (santri, jenis, unit,
+  tanggal) sebagai pertahanan kedua di luar `requestId` *(M)*
+- [ ] **Broadcast & arsip** — tetap N baris (keputusan: skema Notifikasi tidak diubah),
+  sehingga penghematannya lewat **arsip/pemangkasan otomatis** riwayat lama *(S)*
+- [x] **Uji unit retention engine + paritas Mode Demo** (`tools/test-retention.cjs` — 28 kasus) *(S)*
+- [x] **Diagnostik mandiri** `selfTest()` — dijalankan dari editor Apps Script *(S)*
+- [x] **Arsip otomatis riwayat lama + simulasi keselamatannya** (`archiveOldRows`, `tools/test-archive.cjs` — 33 kasus) *(M)*
+- [ ] **`get_ayah_range`** — 1 fetch untuk banyak ayat + susun flashcard paralel
+  (sekarang 3–4 request berurutan per kartu) *(M)*
+- [ ] **Idempotensi tingkat bisnis** — upsert murojaah per (santri, jenis, unit, tanggal) *(M)*
+- [ ] **Rate limit login** — delay progresif setelah N gagal + sheet `Audit` *(S)*
 - [ ] **Arsip otomatis riwayat lama** — pindahkan baris `Hafalan`/`Murojaah`/`Notifikasi`
   lebih tua dari `ARCHIVE_AMBANG_BULAN` ke spreadsheet arsip via cron malam *(M)*
 - [ ] **Hardening token & brute-force login** — penundaan progresif setelah N gagal
@@ -286,7 +347,7 @@ M = sedang, L = besar.
 ## 9. Alur Verifikasi yang Disarankan
 
 1. `npm run check` → semua file JS valid.
-2. `npm start` → buka `http://127.0.0.1:8080/`.
+2. `npm start` → buka `http://localhost:8080/` (set `HOST=127.0.0.1` bila ingin lokal saja).
 3. Login `santri1`/`123456` → cek misi, progres, flashcard, Mode Anak.
 4. Login `ustaz1`/`123456` → cek peta potensi, usulan target, simpan target.
 5. Login `ortu1`/`123456` → cek peta kompetensi, tes acak, kirim semangat (cek juga

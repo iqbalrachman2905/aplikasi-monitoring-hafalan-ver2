@@ -13,38 +13,137 @@
  * ============================================================================
  */
 
-// SPREADSHEET ID (Sesuaikan dengan ID Google Spreadsheet Anda)
-const SPREADSHEET_ID = '16Bg7EG0NXQZkELkzB1mb8RorIv8ruLVgi6ZiGEDLMLU';
+// Versi backend. WAJIB dinaikkan bersamaan dengan APP_VERSION di js/config.js
+// agar frontend bisa mendeteksi "backend tertinggal" (deployment versi lama).
+const APP_VERSION = '4.4.0';
+
+// ID Spreadsheet default. TIDAK perlu diedit lagi di kode: nilai ini hanya
+// dipakai bila Script Property 'SPREADSHEET_ID' belum diisi.
+// Cara mengisi (disarankan): Apps Script > Project Settings > Script Properties
+// > tambah properti SPREADSHEET_ID, lalu boleh ganti spreadsheet tanpa edit kode.
+const SPREADSHEET_ID_DEFAULT = '16Bg7EG0NXQZkELkzB1mb8RorIv8ruLVgi6ZiGEDLMLU';
+const SPREADSHEET_ID = readScriptProperty_('SPREADSHEET_ID') || SPREADSHEET_ID_DEFAULT;
 
 // Zona waktu aplikasi: dipakai untuk "hari ini", streak, dan jadwal review.
 // Menghindari bug batas hari (sebelumnya MTor UTC membuat hari berganti 07:00 WIB).
 const APP_TIMEZONE = 'Asia/Jakarta';
 
-// Kunci rahasia untuk menjalankan setupInitialDatabase() lewat HTTP request.
-// Wahai: fungsi itu MENGHAPUS isi 14 sheet, jadi jangan biarkan publik.
-// Paling aman: jalankan setupInitialDatabase() dari editor Apps Script.
-// Guard tambahan: selama kunci masih default, endpoint setup via HTTP ditolak
-// total (lihat doPost), sehingga kegagalan mengganti kunci tidak menjadi celah.
-const SETUP_SECRET = 'GANTI-KUNCI-SETUP-ANDA';
-const SETUP_SECRET_DEFAULT = 'GANTI-KUNCI-SETUP-ANDA';
+// Batas tunggu lock. TOTAL tunggu server HARUS lebih pendek dari timeout klien
+// (lihat APP_CONFIG.API_POLICY di js/config.js), supaya server menyerah lebih
+// dulu dan user menerima pesan E_BUSY — bukan "koneksi putus" palsu.
+const LOCK_WAIT_MS = 5000;   // per percobaan
+const LOCK_ATTEMPTS = 2;     // 2 x 5 dtk = maksimal ~10 dtk
+
+// Berapa lama hasil sebuah request tulis disimpan untuk mencegah dobEL saat
+// klien mengirim ulang request yang sama (idempotency key).
+const IDEMPOTENCY_TTL_SEC = 600;
+
+// Penanda versi skema/trigger yang sudah dipasang.
+const PROP_TRIGGER_FLAG = 'trigger_installed_v1';
+const PROP_LAST_NIGHTLY_RUN = 'SYNC_STATE_LAST_NIGHTLY_RUN';
+
+/**
+ * Capability yang diiklankan ke frontend pada SETIAP respons. Klien memakainya
+ * untuk tahu fitur backend mana yang tersedia (mis. idempotency) sehingga
+ * perilaku aman-nya tidak menebak-nebak.
+ */
+const SERVER_CAPABILITIES = {
+  appVersion: APP_VERSION,
+  idempotency: true,
+  errorCodes: true,
+  requestId: true,
+  feedbackToNotif: true,
+  notifMarkRead: true,
+  lazySessionCleanup: true,
+  selfInstallTrigger: true
+};
+
+/** Baca Script Property dengan aman (PropertiesService bisa gagal di beberapa konteks). */
+function readScriptProperty_(key) {
+  try {
+    return PropertiesService.getScriptProperties().getProperty(key) || '';
+  } catch (e) {
+    return '';
+  }
+}
+
+/** Tulis Script Property dengan aman. */
+function writeScriptProperty_(key, value) {
+  try {
+    PropertiesService.getScriptProperties().setProperty(key, String(value));
+    return true;
+  } catch (e) {
+    Logger.log('gagal menulis properti ' + key + ': ' + e);
+    return false;
+  }
+}
 
 // ============================================================================
 // ENTRY POINTS (doGet & doPost)
 // ============================================================================
 
 function doGet(e) {
+  // Berguna sebagai health check sederhana: versi backend + capability.
   return responseJSON({
+    success: true,
     status: 'API Aktif',
     nama: 'Quran Retention Engine API',
-    versi: '4.0.0',
+    versi: APP_VERSION,
+    capabilities: SERVER_CAPABILITIES,
     timestamp: new Date().toISOString()
   });
+}
+
+/**
+ * Jalur idempotensi: bila klien mengirim requestId yang sudah pernah diproses,
+ * kembalikan hasil yang sama TANPA mengeksekusi ulang. Ini yang mencegah data
+ * dobel saat request sebenarnya sukses tetapi klien menganggapnya timeout.
+ *
+ * @param {object} request body JSON dari klien (punya requestId & action)
+ * @param {function(): object} work fungsi yang menghasilkan respons JSON
+ */
+function withIdempotency(request, work) {
+  const requestId = request && request.requestId ? String(request.requestId) : '';
+  if (!requestId) return work();
+
+  let cache = null;
+  try {
+    cache = CacheService.getScriptCache();
+  } catch (e) {
+    return work(); // cache tidak tersedia -> jalankan normal
+  }
+
+  const cacheKey = 'idem:' + requestId;
+  try {
+    const cached = cache.get(cacheKey);
+    if (cached) {
+      const parsed = JSON.parse(cached);
+      parsed.duplicate = true; // penanda: hasil diambil dari pemanggilan sebelumnya
+      return parsed;
+    }
+  } catch (e) {
+    Logger.log('idempotency read gagal: ' + e);
+  }
+
+  const result = work();
+
+  // Hanya simpan hasil yang benar-benar sukses, supaya request yang gagal
+  // (mis. E_BUSY) tetap bisa dicoba ulang oleh klien.
+  try {
+    if (result && result.success) {
+      cache.put(cacheKey, JSON.stringify(result), IDEMPOTENCY_TTL_SEC);
+    }
+  } catch (e) {
+    Logger.log('idempotency write gagal: ' + e);
+  }
+
+  return result;
 }
 
 function doPost(e) {
   try {
     if (!e || !e.postData || !e.postData.contents) {
-      return responseJSON({ success: false, message: 'Request payload kosong' });
+      return responseJSON({ success: false, code: 'E_VALIDATION', message: 'Request payload kosong' });
     }
 
     const request = JSON.parse(e.postData.contents);
@@ -52,30 +151,24 @@ function doPost(e) {
 
     // Public / Non-token action
     if (action === 'login') {
-      return responseJSON(loginUser(request.username, request.password));
+      const loginResult = loginUser(request.username, request.password);
+      // Perawatan ringan setelah login sukses: pastikan trigger malam terpasang.
+      if (loginResult && loginResult.success) ensureNightlyTrigger();
+      return responseJSON(loginResult);
     }
-    if (action === 'setup_database') {
-      // Endpoint destruktif (clear 14 sheet) -> wajib menyertakan kunci rahasia.
-      // Bila kunci masih bawaan repo (belum pernah diganti), endpoint ditolak
-      // meskipun pengirim kebetulan mengirim nilai default yang sama.
-      if (!SETUP_SECRET || SETUP_SECRET === SETUP_SECRET_DEFAULT || request.setupKey !== SETUP_SECRET) {
-        return responseJSON({
-          success: false,
-          message: 'Akses setup ditolak. Jalankan setupInitialDatabase() langsung dari editor Apps Script.'
-        });
-      }
-      return responseJSON(setupInitialDatabase());
-    }
+    // CATATAN: endpoint 'setup_database' lewat HTTP sudah DIHAPUS (v4.3).
+    // setupInitialDatabase() menghapus isi 14 sheet; jalankan HANYA dari editor
+    // Apps Script. Fungsi GAS tidak terkspos via HTTP, jadi ini aman.
 
     // Token-required actions
     const token = request.token;
     if (!token) {
-      return responseJSON({ success: false, message: 'Token sesi diperlukan' });
+      return responseJSON({ success: false, code: 'E_AUTH', message: 'Token sesi diperlukan' });
     }
 
     const session = validateSession(token);
     if (!session) {
-      return responseJSON({ success: false, message: 'Sesi tidak valid atau telah kedaluwarsa', unauthorized: true });
+      return responseJSON({ success: false, code: 'E_AUTH', unauthorized: true, message: 'Sesi tidak valid atau telah kedaluwarsa' });
     }
 
     // Route actions
@@ -89,6 +182,9 @@ function doPost(e) {
       case 'get_profile':
         return responseJSON(getUserProfile(session));
 
+      case 'health_check':
+        return responseJSON(healthCheck(session));
+
       // --- USTAZ ENDPOINTS ---
       case 'ustaz_get_dashboard':
         return responseJSON(ustazGetDashboard(session));
@@ -97,29 +193,29 @@ function doPost(e) {
         return responseJSON(ustazGetSantriDetail(session, request.santriId));
 
       case 'ustaz_add_setoran':
-        return responseJSON(ustazAddSetoran(session, request.data));
+        return responseJSON(withIdempotency(request, function () { return ustazAddSetoran(session, request.data); }));
 
       case 'ustaz_save_target':
-        return responseJSON(ustazSaveTarget(session, request.data));
+        return responseJSON(withIdempotency(request, function () { return ustazSaveTarget(session, request.data); }));
 
       case 'ustaz_send_feedback':
-        return responseJSON(ustazSendFeedback(session, request.data));
+        return responseJSON(withIdempotency(request, function () { return ustazSendFeedback(session, request.data); }));
 
       case 'ustaz_send_broadcast':
-        return responseJSON(ustazSendBroadcast(session, request.data));
+        return responseJSON(withIdempotency(request, function () { return ustazSendBroadcast(session, request.data); }));
 
       // --- SANTRI ENDPOINTS ---
       case 'santri_get_dashboard':
         return responseJSON(santriGetDashboard(session));
 
       case 'santri_confirm_murojaah':
-        return responseJSON(santriConfirmMurojaah(session, request.data));
+        return responseJSON(withIdempotency(request, function () { return santriConfirmMurojaah(session, request.data); }));
 
       case 'santri_submit_flashcard_test':
-        return responseJSON(santriSubmitFlashcard(session, request.data));
+        return responseJSON(withIdempotency(request, function () { return santriSubmitFlashcard(session, request.data); }));
 
       case 'santri_mark_notif_read':
-        return responseJSON(markNotificationRead(session, request.notifId));
+        return responseJSON(withIdempotency(request, function () { return markNotificationRead(session, request.notifId); }));
 
       // --- ORTU ENDPOINTS ---
       case 'ortu_get_dashboard':
@@ -129,35 +225,175 @@ function doPost(e) {
         return responseJSON(ortuGetRandomTest(session));
 
       case 'ortu_submit_test_result':
-        return responseJSON(ortuSubmitTestResult(session, request.data));
+        return responseJSON(withIdempotency(request, function () { return ortuSubmitTestResult(session, request.data); }));
 
       case 'ortu_send_apresiasi':
-        return responseJSON(ortuSendApresiasi(session, request.data));
+        return responseJSON(withIdempotency(request, function () { return ortuSendApresiasi(session, request.data); }));
 
       // --- QURAN CACHE ENDPOINTS ---
       case 'get_ayah_content':
         return responseJSON(getAyahContent(request.surah, request.ayah));
 
       default:
-        return responseJSON({ success: false, message: 'Action tidak ditemukan: ' + action });
+        return responseJSON({ success: false, code: 'E_VALIDATION', message: 'Action tidak ditemukan: ' + action });
     }
   } catch (error) {
+    // Detail teknis TIDAK dikirim ke klien (mencegah kebocoran internal);
+    // aktifkan Script Property DEBUG_ERRORS=1 bila sedang menelusuri masalah.
+    Logger.log('doPost error: ' + error + '\n' + (error && error.stack ? error.stack : ''));
+    const debug = readScriptProperty_('DEBUG_ERRORS') === '1';
     return responseJSON({
       success: false,
-      message: 'Terjadi kesalahan pemrosesan server',
-      error: error.toString()
+      code: 'E_UNKNOWN',
+      message: 'Terjadi kesalahan pada server. Coba lagi sebentar; bila berulang hubungi admin.',
+      error: debug ? error.toString() : undefined
     });
   }
 }
 
 function responseJSON(data) {
-  return ContentService.createTextOutput(JSON.stringify(data))
+  // Semua respons membawa versi + capability agar frontend selalu tahu
+  // apakah deployment backend sudah diperbarui (masalah "sudah dibenerin
+  // tapi masih error" biasanya karena deployment versi lama masih dipakai).
+  const payload = (data && typeof data === 'object' && !Array.isArray(data)) ? data : { success: true, data: data };
+  if (typeof payload.appVersion === 'undefined') payload.appVersion = APP_VERSION;
+  if (typeof payload.capabilities === 'undefined') payload.capabilities = SERVER_CAPABILITIES;
+  return ContentService.createTextOutput(JSON.stringify(payload))
     .setMimeType(ContentService.MimeType.JSON);
+}
+
+/** Respons standar saat lock tidak didapat (retryable di sisi klien). */
+function busyResponse() {
+  return {
+    success: false,
+    code: 'E_BUSY',
+    retryable: true,
+    message: 'Server sedang sibuk menyimpan data. Coba lagi sebentar lagi.'
+  };
+}
+
+/**
+ * Jalankan pekerjaan tulis di dalam LockService dengan flush() di akhir.
+ * Pola tunggal untuk SEMUA endpoint tulis agar tidak ada lagi endpoint yang
+ * lupa memakai lock (sumber duplikasi/persaingan tulis).
+ *
+ * @param {function(): object} work
+ * @returns {object} hasil kerja, atau busyResponse() bila lock gagal didapat
+ */
+function withLock(work, options) {
+  const lock = LockService.getScriptLock();
+  if (!acquireLock(lock)) return busyResponse();
+  try {
+    return work();
+  } finally {
+    try { SpreadsheetApp.flush(); } catch (flushErr) { Logger.log('flush gagal: ' + flushErr); }
+    // Setiap penulisan menaikkan versi data -> cache dashboard tidak menyajikan
+    // angka lama tepat setelah user menyimpan (cache tetap efektif untuk
+    // pembacaan berulang). Penulisan cache ayat boleh melewati ini.
+    if (!options || options.bumpDash !== false) bumpDashVersion_();
+    lock.releaseLock();
+  }
 }
 
 // ============================================================
 // HELPER GET SPREADSHEET
 // ============================================================
+
+// Cache lintas-request (CacheService). Sebelumnya proyek ini TIDAK memakai
+// CacheService sama sekali, sehingga setiap request harus membaca sheet dari nol
+// — termasuk validasi sesi di SETIAP request. Cache ini yang memutus biaya tetap
+// per-request tersebut.
+function getCache_() {
+  try { return CacheService.getScriptCache(); } catch (e) { return null; }
+}
+
+/**
+ * Versi data dashboard. Dinaikkan setiap ada penulisan sehingga dashboard yang
+ * dibuka tepat setelah menyimpan selalu segar, sementara pembacaan berulang
+ * dalam rentang singkat dilayani cache (bukan hitung ulang).
+ */
+function dashVersion_() {
+  const c = getCache_();
+  if (!c) return '0';
+  try { return c.get('dashgen') || '0'; } catch (e) { return '0'; }
+}
+
+function bumpDashVersion_() {
+  const c = getCache_();
+  if (!c) return;
+  try { c.put('dashgen', String(Date.now()), 21600); } catch (e) { /* diabaikan */ }
+}
+
+/** TTL (detik) untuk cache payload dashboard. Pendek: cukup meredam trafik berulang. */
+const DASH_CACHE_TTL_SEC = 30;
+const SANTRI_CACHE_TTL_SEC = 20;
+
+function dashCacheKey_(scope, id) {
+  return 'dash:' + scope + ':' + id + ':' + dashVersion_() + ':' + appTodayStr();
+}
+
+function dashCacheGet_(key) {
+  const c = getCache_();
+  if (!c) return null;
+  try {
+    const raw = c.get(key);
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) { return null; }
+}
+
+function dashCachePut_(key, value, ttlSec) {
+  const c = getCache_();
+  if (!c) return;
+  try { c.put(key, JSON.stringify(value), ttlSec || DASH_CACHE_TTL_SEC); } catch (e) { /* payload bisa terlalu besar -> diabaikan */ }
+}
+
+/**
+ * Baca satu sheet sebagai array of array dengan jumlah kolom yang dibatasi
+ * (tanpa baris pertama/header). Menggantikan getDataRange().getValues() yang
+ * selalu membaca seluruh grid termasuk kolom kosong di kanan.
+ */
+function readSheet_(sheetName, numColumns) {
+  const sheet = getSheet(sheetName);
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return [];
+  return sheet.getRange(2, 1, lastRow - 1, numColumns).getValues();
+}
+
+/**
+ * Indeks Master_Hafalan dikelompokkan per ID santri, dibangun SEKALI per request.
+ *
+ * Sebelum perbaikan ini, dashboard ustaz memindai seluruh Master_Hafalan untuk
+ * SETIAP santri (dan sekali lagi untuk menghitung progres target) sehingga
+ * kompleksitasnya O(santri x baris). Dengan indeks ini menjadi O(baris) sekali.
+ */
+function buildMasterIndex_() {
+  const rows = readSheet_('Master_Hafalan', 12);
+  const bySantri = {};
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    const idSantri = String(row[1] || '');
+    if (!idSantri) continue;
+    const unit = {
+      idMaster: String(row[0]),
+      idSantri: idSantri,
+      surah: String(row[2]),
+      ayatMulai: Number(row[3]) || 0,
+      ayatAkhir: Number(row[4]) || 0,
+      tglMulai: row[5],
+      status: String(row[6] || ''),
+      retentionStatus: String(row[7] || 'Hijau'),
+      nextReview: toDateStr(row[8]),
+      interval: Number(row[9]) || 1,
+      consecutiveLupa: Number(row[10]) || 0,
+      consecutiveLancar: Number(row[11]) || 0
+    };
+    if (!bySantri[idSantri]) bySantri[idSantri] = [];
+    bySantri[idSantri].push(unit);
+  }
+  return bySantri;
+}
+
+
 
 // Cache per-eksekusi. SpreadsheetApp.openById() dan getSheetByName() adalah
 // round-trip mahal; sebelumnya dipanggil berulang (6+ kali per request)
@@ -194,18 +430,19 @@ function getSheet(sheetName) {
 }
 
 /**
- * Akuisisi lock dengan retry + backoff, lalu MENANDai bila gagal.
- * waitLock(5000) terlalu pendek saat antrean tulis menumpuk (penyebab
- * kegagalan "Server sibuk" yang sering dialami pengguna).
+ * Akuisisi lock dengan retry + backoff singkat.
+ * Total tunggu dibatasi (LOCK_ATTEMPTS x LOCK_WAIT_MS) dan SELALU lebih pendek
+ * dari timeout klien, supaya user menerima pesan "server sibuk" yang jujur
+ * alih-alih "koneksi putus" padahal server masih bekerja.
  */
 function acquireLock(lock, timeoutMs) {
-  const timeout = Number(timeoutMs) || 15000;
-  for (let attempt = 0; attempt < 3; attempt++) {
+  const timeout = Number(timeoutMs) || LOCK_WAIT_MS;
+  for (let attempt = 0; attempt < LOCK_ATTEMPTS; attempt++) {
     try {
       lock.waitLock(timeout);
       return true;
     } catch (e) {
-      Utilities.sleep(250 * (attempt + 1));
+      Utilities.sleep(200 * (attempt + 1));
     }
   }
   return false;
@@ -302,16 +539,16 @@ function verifyPassword(plainPassword, storedHash) {
 
 function loginUser(username, password) {
   if (!username || !password) {
-    return { success: false, message: 'Username dan password wajib diisi' };
+    return { success: false, code: 'E_VALIDATION', message: 'Username dan password wajib diisi' };
   }
 
+  const data = readSheet_('Users', 6);
   const sheet = getSheet('Users');
-  const data = sheet.getDataRange().getValues();
   if (data.length <= 1) {
-    return { success: false, message: 'Database pengguna kosong. Silakan setup database terlebih dahulu.' };
+    return { success: false, code: 'E_VALIDATION', message: 'Database pengguna kosong. Jalankan setupInitialDatabase() dari editor Apps Script.' };
   }
 
-  for (let i = 1; i < data.length; i++) {
+  for (let i = 0; i < data.length; i++) {
     // Kolom: ID(0), Username(1), Password_Hash(2), Role(3), Nama(4), ID_Terkait(5)
     if (String(data[i][1]).toLowerCase() === String(username).toLowerCase() && verifyPassword(password, data[i][2])) {
       const userId = String(data[i][0]);
@@ -321,7 +558,7 @@ function loginUser(username, password) {
 
       const token = saveSession(userId, role, idTerkait, nama);
       if (!token) {
-        return { success: false, message: 'Gagal membuat sesi, server sedang sibuk' };
+        return { success: false, code: 'E_BUSY', retryable: true, message: 'Server sedang sibuk membuat sesi. Coba lagi sebentar.' };
       }
 
       return {
@@ -335,7 +572,7 @@ function loginUser(username, password) {
     }
   }
 
-  return { success: false, message: 'Username atau password salah' };
+  return { success: false, code: 'E_AUTH', message: 'Username atau password salah' };
 }
 
 function saveSession(userId, role, idTerkait, nama) {
@@ -353,6 +590,17 @@ function saveSession(userId, role, idTerkait, nama) {
     const expiry = new Date(Date.now() + expiryHours * 60 * 60 * 1000);
     // Expiry disimpan sebagai ISO timestamp agar sel tidak diubah menjadi tipe Date.
     sheet.appendRow([token, userId, role, expiry.toISOString(), idTerkait || '', nama || '']);
+
+    // Hangatkan cache agar request pertama setelah login tidak perlu membaca sheet.
+    const cache = getCache_();
+    if (cache) {
+      try {
+        cache.put('sess:' + token, JSON.stringify({
+          userId: userId, role: role, idTerkait: idTerkait || '', nama: nama || '', _exp: expiry.toISOString()
+        }), Math.min(21600, Math.max(60, expiryHours * 3600 - 60)));
+      } catch (e) { /* diabaikan */ }
+    }
+    bumpDashVersion_(); // sesi baru -> dashboard boleh dihitung ulang
     return token;
   } finally {
     // Pastikan tulisan benar-benar ter-commit sebelum lock dilepas, agar
@@ -363,23 +611,66 @@ function saveSession(userId, role, idTerkait, nama) {
 }
 
 function validateSession(token) {
+  // Jalur cepat: sesi yang sudah tervalidasi dilayani cache (tanpa membaca sheet).
+  // Ini memutus biaya tetap per-request — dulu SETIAP request (termasuk 3-4
+  // panggilan ayat per kartu flashcard) membaca seluruh sheet Sessions.
+  const cache = getCache_();
+  const cacheKey = 'sess:' + token;
+  if (cache) {
+    try {
+      const cached = cache.get(cacheKey);
+      if (cached) {
+        const sess = JSON.parse(cached);
+        if (sess && sess._exp && new Date(sess._exp).getTime() > Date.now()) return sess;
+        cache.remove(cacheKey); // kedaluwarsa -> buang
+      }
+    } catch (e) { /* cache rusak -> jatuh ke pembacaan sheet */ }
+  }
+
   const sheet = getSheet('Sessions');
-  const data = sheet.getDataRange().getValues();
+  const data = readSheet_('Sessions', 6);
   const now = new Date();
 
-  for (let i = 1; i < data.length; i++) {
+  for (let i = 0; i < data.length; i++) {
     // Kolom: Token(0), ID_User(1), Role(2), Expiry(3), ID_Terkait(4), Nama(5)
+    // (readSheet_ tanpa header -> index 0 = baris data pertama)
     if (data[i][0] === token) {
       const expiryDate = new Date(data[i][3]);
       if (expiryDate < now) {
+        // Lazy cleanup: hapus token kedaluwarsa yang kebetulan ditemukan.
+        // Ini jaring pengaman bila trigger malam belum/tidak pernah terpasang,
+        // supaya sheet Sessions tidak tumbuh selamanya. Lock singkat + tidak
+        // memblokir request: bila lock tidak didapat, lanjut saja.
+        try {
+          const lock = LockService.getScriptLock();
+          if (lock.tryLock(1500)) {
+            try {
+              sheet.deleteRow(i + 1);
+              SpreadsheetApp.flush();
+            } finally {
+              lock.releaseLock();
+            }
+          }
+        } catch (cleanupErr) {
+          Logger.log('lazy cleanup sesi gagal (diabaikan): ' + cleanupErr);
+        }
         return null; // Expired
       }
-      return {
+      const session = {
         userId: String(data[i][1]),
         role: String(data[i][2]),
         idTerkait: String(data[i][4] || ''),
-        nama: String(data[i][5] || '')
+        nama: String(data[i][5] || ''),
+        _exp: data[i][3]
       };
+      // Simpan ke cache sampai sedikit sebelum masa berlakunya habis.
+      if (cache) {
+        try {
+          const sisaDetik = Math.max(60, Math.floor((expiryDate.getTime() - now.getTime()) / 1000) - 60);
+          cache.put(cacheKey, JSON.stringify(session), Math.min(sisaDetik, 21600));
+        } catch (e) { /* diabaikan */ }
+      }
+      return session;
     }
   }
   return null;
@@ -388,15 +679,21 @@ function validateSession(token) {
 function logoutUser(token) {
   const lock = LockService.getScriptLock();
   if (!acquireLock(lock)) {
-    return { success: false, message: 'Server sedang sibuk menyimpan data. Coba lagi sebentar.' };
+    return busyResponse();
   }
 
   try {
+    const cache = getCache_();
+    if (cache) { try { cache.remove('sess:' + token); } catch (e) { /* diabaikan */ } }
+
     const sheet = getSheet('Sessions');
-    const data = sheet.getDataRange().getValues();
-    for (let i = 1; i < data.length; i++) {
+    const data = readSheet_('Sessions', 6);
+    for (let i = 0; i < data.length; i++) {
       if (data[i][0] === token) {
-        sheet.deleteRow(i + 1);
+        // Tandai kedaluwarsa (bukan deleteRow): deleteRow menggeser seluruh baris
+        // di bawahnya — mahal saat sheet besar. Pembersihan fisik dilakukan batch
+        // malam / lazy cleanup di validateSession.
+        sheet.getRange(i + 2, 4).setValue(new Date(0).toISOString());
         return { success: true, message: 'Logout berhasil' };
       }
     }
@@ -442,7 +739,10 @@ function getConfigMap() {
     XP_BONUS_LANCAR: 5,
     XP_BONUS_RECOVERY: 15,
     SESSION_EXPIRY_JAM: 24,
-    ARCHIVE_AMBANG_BULAN: 6
+    ARCHIVE_AMBANG_BULAN: 6,
+    // 0 = arsip otomatis hanya UJI KERING (aman). Set 1 di sheet Config untuk
+    // benar-benar memindahkan riwayat lama ke sheet Arsip_*.
+    ARCHIVE_AKTIF: 0
   };
 
   for (let i = 1; i < data.length; i++) {
@@ -531,9 +831,9 @@ function calculateNextRetentionState(currentStatus, currentInterval, consecutive
  */
 function updateMasterHafalanCache(masterId, quality, config) {
   const sheet = getSheet('Master_Hafalan');
-  const data = sheet.getDataRange().getValues();
+  const data = readSheet_('Master_Hafalan', 12);
 
-  for (let i = 1; i < data.length; i++) {
+  for (let i = 0; i < data.length; i++) {
     if (String(data[i][0]) === String(masterId)) {
       const currentStatus = data[i][7] || 'Hijau';          // Retention_Status_Cache (kolom 8)
       const currentInterval = data[i][9] || 1;              // Current_Interval_Hari (kolom 10)
@@ -544,7 +844,7 @@ function updateMasterHafalanCache(masterId, quality, config) {
 
       // Update kolom 8-12 Master_Hafalan (Retention_Status_Cache .. Consecutive_Lancar).
       // Baris lama tanpa kolom ke-12 tetap aman: Sheets hanya menulis sel di kanan.
-      sheet.getRange(i + 1, 8, 1, 5).setValues([[
+      sheet.getRange(i + 2, 8, 1, 5).setValues([[
         result.newStatus,
         result.nextReviewStr,
         result.newInterval,
@@ -564,7 +864,7 @@ function updateMasterHafalanCache(masterId, quality, config) {
 
 function awardXPAndQualifyingActivity(santriId, baseXP, bonusXP, isQualifying, recoveryAchieved, config) {
   const sheet = getSheet('Gamifikasi');
-  const data = sheet.getDataRange().getValues();
+  const data = readSheet_('Gamifikasi', 6);
   const today = appTodayStr();
 
   let totalXPToAdd = baseXP + (bonusXP || 0);
@@ -578,9 +878,9 @@ function awardXPAndQualifyingActivity(santriId, baseXP, bonusXP, isQualifying, r
   let longestStreak = 0;
   let lastQualifyingDate = '';
 
-  for (let i = 1; i < data.length; i++) {
+  for (let i = 0; i < data.length; i++) {
     if (String(data[i][0]) === String(santriId)) {
-      rowIndex = i + 1;
+      rowIndex = i + 2;
       currentXP = Number(data[i][1]) || 0;
       currentStreak = Number(data[i][3]) || 0;
       longestStreak = Number(data[i][4]) || 0;
@@ -643,10 +943,10 @@ function awardXPAndQualifyingActivity(santriId, baseXP, bonusXP, isQualifying, r
 
 function checkMilestoneBadges(santriId, xp, level, streak) {
   const badgeSheet = getSheet('Badge');
-  const badgeData = badgeSheet.getDataRange().getValues();
+  const badgeData = readSheet_('Badge', 4);
   const existingBadges = new Set();
 
-  for (let i = 1; i < badgeData.length; i++) {
+  for (let i = 0; i < badgeData.length; i++) {
     if (String(badgeData[i][1]) === String(santriId)) {
       existingBadges.add(String(badgeData[i][2]));
     }
@@ -676,29 +976,27 @@ function checkMilestoneBadges(santriId, xp, level, streak) {
  * Menghasilkan misi harian (Sabaq, Sabqi, Manzil) berdasarkan cache retention
  */
 function generateDailyMissions(santriId, config) {
-  const masterSheet = getSheet('Master_Hafalan');
-  const masterData = masterSheet.getDataRange().getValues();
   const todayStr = appTodayStr();
   const ambangSabqi = Number(config.AMBANG_SABQI_HARI || 30);
 
-  const units = [];
-  for (let i = 1; i < masterData.length; i++) {
-    if (String(masterData[i][1]) === String(santriId)) {
-      units.push({
-        idMaster: String(masterData[i][0]),
-        surah: String(masterData[i][2]),
-        ayatMulai: Number(masterData[i][3]),
-        ayatAkhir: Number(masterData[i][4]),
-        tglMulai: masterData[i][5],
-        diffDays: diffDaysFrom(masterData[i][5]),
-        retentionStatus: masterData[i][7] || 'Hijau',
-        nextReview: toDateStr(masterData[i][8]) || todayStr,
-        interval: Number(masterData[i][9]) || 1,
-        consecutiveLupa: Number(masterData[i][10]) || 0,
-        consecutiveLancar: Number(masterData[i][11]) || 0
-      });
-    }
-  }
+  // Unit diambil dari indeks Master_Hafalan yang sudah dikelompokkan per santri
+  // (satu kali baca untuk seluruh request, bukan satu kali per santri).
+  const indexed = buildMasterIndex_()[santriId] || [];
+  const units = indexed.map(function (u) {
+    return {
+      idMaster: u.idMaster,
+      surah: u.surah,
+      ayatMulai: u.ayatMulai,
+      ayatAkhir: u.ayatAkhir,
+      tglMulai: u.tglMulai,
+      diffDays: diffDaysFrom(u.tglMulai),
+      retentionStatus: u.retentionStatus || 'Hijau',
+      nextReview: u.nextReview || todayStr,
+      interval: u.interval || 1,
+      consecutiveLupa: u.consecutiveLupa || 0,
+      consecutiveLancar: u.consecutiveLancar || 0
+    };
+  });
 
   // Prioritas: Merah > Kuning > overdue > lebih tua.
   const priorityOf = (u) => {
@@ -736,11 +1034,10 @@ function generateDailyMissions(santriId, config) {
 
   // Konfirmasi hari ini dibaca dari sheet Murojaah.
   // Kunci = Jenis_Misi + Detail unit ("Surah (1-20)") => selesai PER UNIT.
-  const murojaahSheet = getSheet('Murojaah');
-  const murojaahData = murojaahSheet.getDataRange().getValues();
+  const murojaahData = readSheet_('Murojaah', 7);
   const completedKeys = new Set();
 
-  for (let i = 1; i < murojaahData.length; i++) {
+  for (let i = 0; i < murojaahData.length; i++) {
     const tgl = toDateStr(murojaahData[i][1]);
     if (String(murojaahData[i][2]) === String(santriId) && tgl === todayStr) {
       completedKeys.add(String(murojaahData[i][3] || '') + '|' + String(murojaahData[i][4] || '').trim());
@@ -779,28 +1076,67 @@ function generateDailyMissions(santriId, config) {
 // --- 1. USTAZ DASHBOARD ---
 function ustazGetDashboard(session) {
   if (session.role !== 'ustaz') {
-    return { success: false, message: 'Akses khusus Ustaz' };
+    return { success: false, code: 'E_FORBIDDEN', message: 'Akses khusus Ustaz' };
   }
 
-  const santriSheet = getSheet('Santri');
-  const masterSheet = getSheet('Master_Hafalan');
-  const targetSheet = getSheet('Target');
-  const gamifikasiSheet = getSheet('Gamifikasi');
+  // Cache pendek (30 dtk) + versi data: pembacaan berulang tidak dihitung ulang,
+  // tetapi setiap penulisan menaikkan versi sehingga data selalu segar.
+  const cacheKey = dashCacheKey_('ustaz', session.userId);
+  const cached = dashCacheGet_(cacheKey);
+  if (cached) return cached;
 
-  const santriData = santriSheet ? santriSheet.getDataRange().getValues() : [];
-  const masterData = masterSheet ? masterSheet.getDataRange().getValues() : [];
-  const targetData = targetSheet ? targetSheet.getDataRange().getValues() : [];
-  const gamifikasiData = gamifikasiSheet ? gamifikasiSheet.getDataRange().getValues() : [];
+  // Setiap sumber data dibaca SEKALI dengan jumlah kolom minimal (dulu: 4 kali
+  // getDataRange() penuh + pemindaian Master_Hafalan per santri).
+  const santriRows = readSheet_('Santri', 4);
+  const masterIndex = buildMasterIndex_();
+  const targetRows = readSheet_('Target', 6);
+  const gamifRows = readSheet_('Gamifikasi', 6);
+
+  const todayStr = appTodayStr();
+  const currentMonthStr = todayStr.slice(0, 7);
+
+  // Indeks gamifikasi & target bulan berjalan (O(baris) sekali).
+  const gamifBySantri = {};
+  for (let i = 0; i < gamifRows.length; i++) {
+    const r = gamifRows[i];
+    const id = String(r[0] || '');
+    if (!id) continue;
+    gamifBySantri[id] = {
+      xp: Number(r[1]) || 0,
+      level: Number(r[2]) || 1,
+      currentStreak: Number(r[3]) || 0,
+      longestStreak: Number(r[4]) || 0
+    };
+  }
+
+  const targetBySantri = {};
+  for (let i = 0; i < targetRows.length; i++) {
+    const r = targetRows[i];
+    const id = String(r[2] || '');
+    if (!id) continue;
+    const bulan = String(r[1] || '');
+    if (!bulan.startsWith(currentMonthStr)) continue;
+    if (targetBySantri[id]) continue; // target pertama bulan ini (perilaku lama)
+    targetBySantri[id] = {
+      idTarget: String(r[0]),
+      bulan: bulan,
+      surah: String(r[3]),
+      ayatMulai: Number(r[4]) || 0,
+      ayatAkhir: Number(r[5]) || 0
+    };
+  }
+
+  // Pencocokan nama surah yang toleran tanda baca/apostrof (dipakai progres target).
+  const norm = function (v) { return String(v || '').replace(/[^a-z0-9]/gi, '').toLowerCase(); };
 
   const santriList = [];
-  const todayStr = appTodayStr();
 
-  for (let i = 1; i < santriData.length; i++) {
-    // Filter santri sesuai ID_Ustaz atau jika ID_Ustaz kosong / admin
-    const idSantri = String(santriData[i][0]);
-    const namaSantri = String(santriData[i][1]);
-    const idUstaz = String(santriData[i][2]);
-    const statusSantri = String(santriData[i][3]);
+  for (let i = 0; i < santriRows.length; i++) {
+    const idSantri = String(santriRows[i][0] || '');
+    if (!idSantri) continue;
+    const namaSantri = String(santriRows[i][1] || '');
+    const idUstaz = String(santriRows[i][2] || '');
+    const statusSantri = String(santriRows[i][3] || '');
 
     // Filter kelompok: hanya santri bimbingan ustaz ini (PRD Section 16).
     // Santri dengan ID_Ustaz kosong tetap ditampilkan agar data hasil migrasi
@@ -808,87 +1144,54 @@ function ustazGetDashboard(session) {
     const isMySantri = !idUstaz || idUstaz === session.userId || (!!session.idTerkait && idUstaz === session.idTerkait);
     if (!isMySantri) continue;
 
-    // Hitung status retensi dari Master_Hafalan cache
+    const units = masterIndex[idSantri] || [];
     let countHijau = 0;
     let countKuning = 0;
     let countMerah = 0;
     let overdueCount = 0;
-    let totalHafalan = 0;
-    // Hafalan terakhir (umur paling muda) -> dipakai usulan target 1-klik.
     let lastUnit = null;
     let lastUnitAge = Infinity;
 
-    for (let j = 1; j < masterData.length; j++) {
-      if (String(masterData[j][1]) === idSantri) {
-        totalHafalan++;
-        const retStatus = masterData[j][7] || 'Hijau';
-        const nextReview = toDateStr(masterData[j][8]);
+    for (let j = 0; j < units.length; j++) {
+      const u = units[j];
+      if (u.retentionStatus === 'Hijau') countHijau++;
+      else if (u.retentionStatus === 'Kuning') countKuning++;
+      else if (u.retentionStatus === 'Merah') countMerah++;
 
-        if (retStatus === 'Hijau') countHijau++;
-        else if (retStatus === 'Kuning') countKuning++;
-        else if (retStatus === 'Merah') countMerah++;
+      if (u.nextReview && u.nextReview < todayStr) overdueCount++;
 
-        if (nextReview && nextReview < todayStr) {
-          overdueCount++;
-        }
-
-        const age = diffDaysFrom(masterData[j][5]);
-        if (age < lastUnitAge) {
-          lastUnitAge = age;
-          lastUnit = {
-            surah: String(masterData[j][2]),
-            ayatMulai: Number(masterData[j][3]),
-            ayatAkhir: Number(masterData[j][4]),
-            retentionStatus: retStatus
-          };
-        }
-      }
-    }
-
-    // Gamifikasi data
-    let streak = 0;
-    let xp = 0;
-    let level = 1;
-    let longestStreak = 0;
-    for (let k = 1; k < gamifikasiData.length; k++) {
-      if (String(gamifikasiData[k][0]) === idSantri) {
-        xp = Number(gamifikasiData[k][1]) || 0;
-        level = Number(gamifikasiData[k][2]) || 1;
-        streak = Number(gamifikasiData[k][3]) || 0;
-        longestStreak = Number(gamifikasiData[k][4]) || 0;
-        break;
-      }
-    }
-
-    // Target bulan ini
-    let currentTarget = null;
-    const currentMonthStr = appTodayStr().slice(0, 7); // YYYY-MM
-    for (let m = 1; m < targetData.length; m++) {
-      if (String(targetData[m][2]) === idSantri && String(targetData[m][1]).startsWith(currentMonthStr)) {
-        currentTarget = {
-          idTarget: targetData[m][0],
-          bulan: String(targetData[m][1]),
-          surah: targetData[m][3],
-          ayatMulai: targetData[m][4],
-          ayatAkhir: targetData[m][5]
+      const age = diffDaysFrom(u.tglMulai);
+      if (age < lastUnitAge) {
+        lastUnitAge = age;
+        lastUnit = {
+          surah: u.surah,
+          ayatMulai: u.ayatMulai,
+          ayatAkhir: u.ayatAkhir,
+          retentionStatus: u.retentionStatus
         };
-        break;
       }
     }
+
+    const totalHafalan = units.length;
+    const gamif = gamifBySantri[idSantri] || { xp: 0, level: 1, currentStreak: 0, longestStreak: 0 };
+    const xp = gamif.xp;
+    const level = gamif.level;
+    const streak = gamif.currentStreak;
+    const longestStreak = gamif.longestStreak;
+
+    const currentTarget = targetBySantri[idSantri] || null;
 
     // Progres capaian target bulan ini (untuk Notifikasi Target Ustaz).
     let targetProgress = null;
     if (currentTarget) {
-      const norm = function (v) { return String(v || '').replace(/[^a-z0-9]/gi, '').toLowerCase(); };
       const tMulai = Number(currentTarget.ayatMulai) || 0;
       const tAkhir = Number(currentTarget.ayatAkhir) || 0;
       const tTotal = Math.max(0, tAkhir - tMulai + 1);
       const covered = {};
-      for (let n = 1; n < masterData.length; n++) {
-        if (String(masterData[n][1]) !== idSantri) continue;
-        if (norm(masterData[n][2]) !== norm(currentTarget.surah)) continue;
-        const a = Math.max(tMulai, Number(masterData[n][3]) || 0);
-        const b = Math.min(tAkhir, Number(masterData[n][4]) || 0);
+      for (let n = 0; n < units.length; n++) {
+        if (norm(units[n].surah) !== norm(currentTarget.surah)) continue;
+        const a = Math.max(tMulai, Number(units[n].ayatMulai) || 0);
+        const b = Math.min(tAkhir, Number(units[n].ayatAkhir) || 0);
         for (let x = a; x <= b; x++) covered[x] = true;
       }
       const doneCount = Object.keys(covered).length;
@@ -901,8 +1204,8 @@ function ustazGetDashboard(session) {
 
     // Auto-flag detection
     const flags = [];
-    if (countMerah > 0) flags.push(`Kritis: ${countMerah} unit hafalan status Merah`);
-    if (overdueCount >= 2) flags.push(`Overdue: ${overdueCount} jadwal review terlewat`);
+    if (countMerah > 0) flags.push('Kritis: ' + countMerah + ' unit hafalan status Merah');
+    if (overdueCount >= 2) flags.push('Overdue: ' + overdueCount + ' jadwal review terlewat');
     if (streak === 0 && totalHafalan > 0) flags.push('Streak terputus');
 
     santriList.push({
@@ -932,27 +1235,37 @@ function ustazGetDashboard(session) {
     });
   }
 
-  return {
+  const result = {
     success: true,
     ustazName: session.nama,
     santriList: santriList,
     stats: {
       totalSantri: santriList.length,
-      totalMerah: santriList.reduce((acc, s) => acc + s.retention.merah, 0),
-      totalKuning: santriList.reduce((acc, s) => acc + s.retention.kuning, 0),
-      totalHijau: santriList.reduce((acc, s) => acc + s.retention.hijau, 0),
-      flaggedSantri: santriList.filter(s => s.flags.length > 0).length
+      totalMerah: santriList.reduce(function (acc, s) { return acc + s.retention.merah; }, 0),
+      totalKuning: santriList.reduce(function (acc, s) { return acc + s.retention.kuning; }, 0),
+      totalHijau: santriList.reduce(function (acc, s) { return acc + s.retention.hijau; }, 0),
+      flaggedSantri: santriList.filter(function (s) { return s.flags.length > 0; }).length
     }
   };
+
+  dashCachePut_(cacheKey, result, DASH_CACHE_TTL_SEC);
+  return result;
 }
 
 // Ustaz Add Setoran
 function ustazAddSetoran(session, payload) {
-  if (session.role !== 'ustaz') return { success: false, message: 'Unauthorized' };
+  if (session.role !== 'ustaz') return { success: false, code: 'E_FORBIDDEN', message: 'Unauthorized' };
+
+  // Otorisasi (PRD Section 16): ustaz hanya boleh mencatat setoran untuk santri
+  // kelompoknya. Sebelumnya cek ini hanya ada di ustazGetSantriDetail sehingga
+  // ID santri mana pun bisa dikirim dari klien (celah IDOR).
+  if (!payload || !isSantriInUstazGroup(session, payload.idSantri)) {
+    return { success: false, code: 'E_FORBIDDEN', message: 'Santri ini bukan bagian dari kelompok bimbingan Anda' };
+  }
 
   const lock = LockService.getScriptLock();
   if (!acquireLock(lock)) {
-    return { success: false, message: 'Server sedang sibuk menyimpan data. Coba lagi sebentar.' };
+    return busyResponse();
   }
 
   try {
@@ -978,17 +1291,17 @@ function ustazAddSetoran(session, payload) {
     ]);
 
     // 2. Tambah / Update Master_Hafalan
-    const masterData = masterSheet.getDataRange().getValues();
+    const masterData = readSheet_('Master_Hafalan', 12); // kolom minimal; index 0 = baris sheet ke-2
     let existingIndex = -1;
 
-    for (let i = 1; i < masterData.length; i++) {
+    for (let i = 0; i < masterData.length; i++) {
       if (
         String(masterData[i][1]) === String(payload.idSantri) &&
         String(masterData[i][2]).toLowerCase() === String(payload.surah).toLowerCase() &&
         Number(masterData[i][3]) === Number(payload.ayatMulai) &&
         Number(masterData[i][4]) === Number(payload.ayatAkhir)
       ) {
-        existingIndex = i + 1;
+        existingIndex = i + 2; // +2: readSheet_ tanpa header, getRange 1-based
         break;
       }
     }
@@ -999,7 +1312,7 @@ function ustazAddSetoran(session, payload) {
 
     if (existingIndex > 0) {
       // Update cache unit yang sudah ada memakai rumus SM-2-lite.
-      const row = masterData[existingIndex - 1];
+      const row = masterData[existingIndex - 2];
       const state = calculateNextRetentionState(
         row[7] || 'Hijau',
         row[9] || 1,
@@ -1068,22 +1381,27 @@ function ustazAddSetoran(session, payload) {
 
 // Ustaz Save Target
 function ustazSaveTarget(session, payload) {
-  if (session.role !== 'ustaz') return { success: false, message: 'Unauthorized' };
+  if (session.role !== 'ustaz') return { success: false, code: 'E_FORBIDDEN', message: 'Unauthorized' };
+
+  // Otorisasi (PRD Section 16): target hanya untuk santri kelompok ustaz ini.
+  if (!payload || !isSantriInUstazGroup(session, payload.idSantri)) {
+    return { success: false, code: 'E_FORBIDDEN', message: 'Santri ini bukan bagian dari kelompok bimbingan Anda' };
+  }
 
   const lock = LockService.getScriptLock();
   if (!acquireLock(lock)) {
-    return { success: false, message: 'Server sedang sibuk menyimpan data. Coba lagi sebentar.' };
+    return busyResponse();
   }
 
   try {
     const targetSheet = getSheet('Target');
-    const data = targetSheet.getDataRange().getValues();
+    const data = readSheet_('Target', 6);
     const bulan = payload.bulan || appTodayStr().slice(0, 7);
 
     let updated = false;
-    for (let i = 1; i < data.length; i++) {
+    for (let i = 0; i < data.length; i++) {
       if (String(data[i][2]) === String(payload.idSantri) && String(data[i][1]) === bulan) {
-        targetSheet.getRange(i + 1, 4, 1, 3).setValues([[
+        targetSheet.getRange(i + 2, 4, 1, 3).setValues([[
           payload.surah,
           Number(payload.ayatMulai),
           Number(payload.ayatAkhir)
@@ -1114,47 +1432,85 @@ function ustazSaveTarget(session, payload) {
 }
 
 // Ustaz Send Feedback
+// Temuan v4.2: fungsi ini menulis ke sheet 'Feedback' yang TIDAK PERNAH dibaca
+// oleh dashboard Santri, sehingga feedback ustaz "hilang" (di Mode Demo tampak
+// berhasil karena mock menulis ke notifications). Sejak v4.3 feedback ditulis
+// ke DUA tempat: sheet Feedback (arsip pedagogis per setoran) DAN sheet
+// Notifikasi (yang benar-benar dibaca dashboard Santri) — sama seperti
+// ortuSendApresiasi.
 function ustazSendFeedback(session, payload) {
-  if (session.role !== 'ustaz') return { success: false, message: 'Unauthorized' };
+  if (session.role !== 'ustaz') return { success: false, code: 'E_FORBIDDEN', message: 'Unauthorized' };
+  if (!payload || !payload.pesan) {
+    return { success: false, code: 'E_VALIDATION', message: 'Pesan feedback wajib diisi' };
+  }
 
-  const feedbackSheet = getSheet('Feedback');
-  const todayStr = appTodayStr();
-  feedbackSheet.appendRow([
-    Utilities.getUuid(),
-    payload.idSantri,
-    payload.idHafalan || '',
-    session.userId,
-    payload.pesan,
-    todayStr,
-    'Belum'
-  ]);
+  // Otorisasi (PRD Section 16): ustaz hanya untuk santri kelompoknya.
+  if (!isSantriInUstazGroup(session, payload.idSantri)) {
+    return { success: false, code: 'E_FORBIDDEN', message: 'Santri ini bukan bagian dari kelompok bimbingan Anda' };
+  }
 
-  return { success: true, message: 'Feedback berhasil dikirim ke santri' };
+  return withLock(function () {
+    const feedbackSheet = getSheet('Feedback');
+    const notifSheet = getSheet('Notifikasi');
+    const todayStr = appTodayStr();
+
+    feedbackSheet.appendRow([
+      Utilities.getUuid(),
+      payload.idSantri,
+      payload.idHafalan || '',
+      session.userId,
+      payload.pesan,
+      todayStr,
+      'Belum'
+    ]);
+
+    // Baris inilah yang dibaca santriGetDashboard(). Tipe memakai awalan
+    // 'Feedback Ustaz' agar ikon 📖 di dashboard santri otomatis terpakai.
+    notifSheet.appendRow([
+      Utilities.getUuid(),
+      payload.idSantri,
+      'Feedback Ustaz',
+      `Ustaz ${session.nama}: "${payload.pesan}"`,
+      todayStr,
+      'Belum'
+    ]);
+
+    return { success: true, message: 'Feedback berhasil dikirim ke santri' };
+  });
 }
 
 // Ustaz Send Broadcast
 function ustazSendBroadcast(session, payload) {
-  if (session.role !== 'ustaz') return { success: false, message: 'Unauthorized' };
+  if (session.role !== 'ustaz') return { success: false, code: 'E_FORBIDDEN', message: 'Unauthorized' };
   if (!payload || !payload.pesan) return { success: false, message: 'Pesan broadcast wajib diisi' };
 
   const lock = LockService.getScriptLock();
   if (!acquireLock(lock)) {
-    return { success: false, message: 'Server sedang sibuk. Coba lagi sebentar.' };
+    return busyResponse();
   }
 
   try {
     const notifSheet = getSheet('Notifikasi');
-    const santriSheet = getSheet('Santri');
-    const santriData = santriSheet.getDataRange().getValues();
+    const santriData = readSheet_('Santri', 4);
     const todayStr = appTodayStr();
 
     // Batch write: susun semua baris dulu, lalu tulis sekali (setValues).
     // Sebelumnya appendRow dipanggil per santri — penyebab broadcast lambat /
     // timeout ketika jumlah santri banyak.
     const rows = [];
-    for (let i = 1; i < santriData.length; i++) {
+    let skipped = 0;
+    for (let i = 0; i < santriData.length; i++) {
       const idSantri = String(santriData[i][0]);
       if (!idSantri) continue;
+
+      // v4.3: broadcast dibatasi ke kelompok bimbingan ustaz ini (PRD Section 16).
+      // Santri dengan ID_Ustaz kosong tetap diikutkan (aturan sama dengan
+      // isSantriInUstazGroup) supaya data migrasi tidak kehilangan pengumuman.
+      const idUstazSantri = String(santriData[i][2] || '');
+      const inGroup = !idUstazSantri || idUstazSantri === session.userId ||
+        (!!session.idTerkait && idUstazSantri === session.idTerkait);
+      if (!inGroup) { skipped++; continue; }
+
       rows.push([
         Utilities.getUuid(),
         idSantri,
@@ -1164,11 +1520,14 @@ function ustazSendBroadcast(session, payload) {
         'Belum'
       ]);
     }
+    if (rows.length === 0) {
+      return { success: false, code: 'E_VALIDATION', message: 'Tidak ada santri dalam kelompok bimbingan Anda untuk dikirimi pesan.' };
+    }
     if (rows.length > 0) {
       notifSheet.getRange(notifSheet.getLastRow() + 1, 1, rows.length, 6).setValues(rows);
     }
 
-    return { success: true, message: 'Pesan broadcast terkirim ke seluruh santri' };
+    return { success: true, message: 'Pesan broadcast terkirim ke ' + rows.length + ' santri bimbingan Anda' + (skipped > 0 ? ' (' + skipped + ' santri di luar kelompok dilewati)' : '') };
   } finally {
     // Pastikan tulisan benar-benar ter-commit sebelum lock dilepas, agar
     // request berikutnya tidak membaca data lama.
@@ -1186,8 +1545,11 @@ function ustazSendBroadcast(session, payload) {
 function isSantriInUstazGroup(session, santriId) {
   const santriSheet = getSpreadsheet().getSheetByName('Santri');
   if (!santriSheet) return false;
-  const data = santriSheet.getDataRange().getValues();
-  for (let i = 1; i < data.length; i++) {
+  const lastRow = santriSheet.getLastRow();
+  if (lastRow < 2) return false;
+  // 4 kolom saja (bukan seluruh grid) — fungsi ini dipanggil di setiap aksi tulis.
+  const data = santriSheet.getRange(2, 1, lastRow - 1, 4).getValues();
+  for (let i = 0; i < data.length; i++) {
     if (String(data[i][0]) === String(santriId)) {
       const idUstaz = String(data[i][2] || '');
       return !idUstaz || idUstaz === session.userId || (!!session.idTerkait && idUstaz === session.idTerkait);
@@ -1198,48 +1560,40 @@ function isSantriInUstazGroup(session, santriId) {
 
 // Ustaz Get Santri Detail
 function ustazGetSantriDetail(session, santriId) {
-  if (!santriId) return { success: false, message: 'ID santri wajib dikirim' };
+  if (!santriId) return { success: false, code: 'E_VALIDATION', message: 'ID santri wajib dikirim' };
 
   // Otorisasi (PRD Section 16): ustaz hanya untuk santri kelompoknya,
   // santri hanya untuk datanya sendiri.
   const isSantriSelf = session.role === 'santri' && String(santriId) === String(session.userId);
   if (!isSantriSelf && session.role !== 'ustaz') {
-    return { success: false, message: 'Akses ditolak' };
+    return { success: false, code: 'E_FORBIDDEN', message: 'Akses ditolak' };
   }
   if (session.role === 'ustaz' && !isSantriInUstazGroup(session, santriId)) {
-    return { success: false, message: 'Santri ini bukan bagian dari kelompok bimbingan Anda' };
+    return { success: false, code: 'E_FORBIDDEN', message: 'Santri ini bukan bagian dari kelompok bimbingan Anda' };
   }
 
-  const masterSheet = getSheet('Master_Hafalan');
-  const hafalanSheet = getSheet('Hafalan');
-  const tesSheet = getSheet('Riwayat_Tes');
-  const murojaahSheet = getSheet('Murojaah');
+  // Kolom minimal + indeks Master_Hafalan (satu kali baca per request).
+  // Hanya setoran yang dibutuhkan di sini; Riwayat_Tes & Murojaah tidak dibaca
+  // agar endpoint ini tidak memuat I/O yang tak terpakai.
+  const hafalanData = readSheet_('Hafalan', 10);
 
-  const masterData = masterSheet.getDataRange().getValues();
-  const hafalanData = hafalanSheet.getDataRange().getValues();
-  const tesData = tesSheet.getDataRange().getValues();
-  const murojaahData = murojaahSheet.getDataRange().getValues();
-
-  const units = [];
-  for (let i = 1; i < masterData.length; i++) {
-    if (String(masterData[i][1]) === String(santriId)) {
-      units.push({
-        idMaster: masterData[i][0],
-        surah: masterData[i][2],
-        ayatMulai: masterData[i][3],
-        ayatAkhir: masterData[i][4],
-        tglMulai: masterData[i][5],
-        status: masterData[i][6],
-        retentionStatus: masterData[i][7] || 'Hijau',
-        nextReview: masterData[i][8],
-        interval: masterData[i][9],
-        consecutiveLupa: masterData[i][10]
-      });
-    }
-  }
+  const units = (buildMasterIndex_()[santriId] || []).map(function (u) {
+    return {
+      idMaster: u.idMaster,
+      surah: u.surah,
+      ayatMulai: u.ayatMulai,
+      ayatAkhir: u.ayatAkhir,
+      tglMulai: u.tglMulai,
+      status: u.status,
+      retentionStatus: u.retentionStatus || 'Hijau',
+      nextReview: u.nextReview,
+      interval: u.interval,
+      consecutiveLupa: u.consecutiveLupa
+    };
+  });
 
   const setoranHistory = [];
-  for (let i = 1; i < hafalanData.length; i++) {
+  for (let i = 0; i < hafalanData.length; i++) {
     if (String(hafalanData[i][2]) === String(santriId)) {
       setoranHistory.push({
         idHafalan: hafalanData[i][0],
@@ -1265,76 +1619,71 @@ function ustazGetSantriDetail(session, santriId) {
 function santriGetDashboard(session) {
   const santriId = session.role === 'santri' ? session.userId : session.idTerkait;
   if (!santriId) {
-    return { success: false, message: 'Akun ini tidak terhubung dengan data santri (ID_Terkait kosong)' };
+    return { success: false, code: 'E_VALIDATION', message: 'Akun ini tidak terhubung dengan data santri (ID_Terkait kosong)' };
   }
+
+  // Cache pendek + versi data: flashcard/aksi tulis menaikkan versi, sehingga
+  // pemuatan berulang tidak dihitung ulang dari nol.
+  const cacheKey = dashCacheKey_('santri', santriId);
+  const cached = dashCacheGet_(cacheKey);
+  if (cached) return cached;
+
   const config = getConfigMap();
 
-  // 1. Daily Missions
+  // 1. Daily Missions (memakai indeks Master_Hafalan, sekali baca)
   const missions = generateDailyMissions(santriId, config);
 
   // 2. Gamifikasi
-  const gamifikasiSheet = getSheet('Gamifikasi');
-  const gamifData = gamifikasiSheet.getDataRange().getValues();
   let gamifikasi = { xp: 0, level: 1, currentStreak: 0, longestStreak: 0, lastQualifyingDate: '' };
-
-  for (let i = 1; i < gamifData.length; i++) {
-    if (String(gamifData[i][0]) === String(santriId)) {
+  const gamifRows = readSheet_('Gamifikasi', 6);
+  for (let i = 0; i < gamifRows.length; i++) {
+    if (String(gamifRows[i][0]) === String(santriId)) {
       gamifikasi = {
-        xp: Number(gamifData[i][1]) || 0,
-        level: Number(gamifData[i][2]) || 1,
-        currentStreak: Number(gamifData[i][3]) || 0,
-        longestStreak: Number(gamifData[i][4]) || 0,
-        lastQualifyingDate: gamifData[i][5] || ''
+        xp: Number(gamifRows[i][1]) || 0,
+        level: Number(gamifRows[i][2]) || 1,
+        currentStreak: Number(gamifRows[i][3]) || 0,
+        longestStreak: Number(gamifRows[i][4]) || 0,
+        lastQualifyingDate: gamifRows[i][5] || ''
       };
       break;
     }
   }
 
   // 3. Badges
-  const badgeSheet = getSheet('Badge');
-  const badgeData = badgeSheet.getDataRange().getValues();
+  const badgeRows = readSheet_('Badge', 4);
   const badges = [];
-  for (let i = 1; i < badgeData.length; i++) {
-    if (String(badgeData[i][1]) === String(santriId)) {
-      badges.push({
-        idBadge: badgeData[i][0],
-        nama: badgeData[i][2],
-        tgl: badgeData[i][3]
-      });
+  for (let i = 0; i < badgeRows.length; i++) {
+    if (String(badgeRows[i][1]) === String(santriId)) {
+      badges.push({ idBadge: badgeRows[i][0], nama: badgeRows[i][2], tgl: badgeRows[i][3] });
     }
   }
 
   // 4. Notifications & Feedbacks
-  const notifSheet = getSheet('Notifikasi');
-  const notifData = notifSheet.getDataRange().getValues();
+  const notifRows = readSheet_('Notifikasi', 6);
   const notifications = [];
-  for (let i = 1; i < notifData.length; i++) {
-    if (String(notifData[i][1]) === String(santriId)) {
+  for (let i = 0; i < notifRows.length; i++) {
+    if (String(notifRows[i][1]) === String(santriId)) {
       notifications.push({
-        idNotif: notifData[i][0],
-        tipe: notifData[i][2],
-        pesan: notifData[i][3],
-        tgl: notifData[i][4],
-        dibaca: notifData[i][5] === 'Sudah'
+        idNotif: notifRows[i][0],
+        tipe: notifRows[i][2],
+        pesan: notifRows[i][3],
+        tgl: notifRows[i][4],
+        dibaca: notifRows[i][5] === 'Sudah'
       });
     }
   }
 
-  // 5. Activity Heatmap (Last 30 Days)
-  const murojaahSheet = getSheet('Murojaah');
-  const murojaahData = murojaahSheet.getDataRange().getValues();
+  // 5. Activity Heatmap (30 hari terakhir) — dari log Murojaah.
+  const murojaahRows = readSheet_('Murojaah', 7);
   const activityMap = {};
-
-  for (let i = 1; i < murojaahData.length; i++) {
-    if (String(murojaahData[i][2]) === String(santriId)) {
-      const tgl = toDateStr(murojaahData[i][1]);
-      if (tgl) {
-        activityMap[tgl] = (activityMap[tgl] || 0) + 1;
-      }
+  for (let i = 0; i < murojaahRows.length; i++) {
+    if (String(murojaahRows[i][2]) === String(santriId)) {
+      const tgl = toDateStr(murojaahRows[i][1]);
+      if (tgl) activityMap[tgl] = (activityMap[tgl] || 0) + 1;
     }
   }
 
-  return {
+  const result = {
     success: true,
     nama: session.nama,
     santriId: santriId,
@@ -1344,13 +1693,16 @@ function santriGetDashboard(session) {
     notifications: notifications.slice(-10).reverse(),
     activityMap: activityMap
   };
+
+  dashCachePut_(cacheKey, result, SANTRI_CACHE_TTL_SEC);
+  return result;
 }
 
 // Santri Confirm Murojaah
 function santriConfirmMurojaah(session, payload) {
   // Otorisasi: hanya santri (atau admin) yang boleh mengonfirmasi murojaah.
   if (session.role !== 'santri' && session.role !== 'admin') {
-    return { success: false, message: 'Akses khusus Santri' };
+    return { success: false, code: 'E_FORBIDDEN', message: 'Akses khusus Santri' };
   }
 
   const santriId = session.role === 'santri' ? session.userId : (payload.idSantri || session.idTerkait);
@@ -1358,7 +1710,7 @@ function santriConfirmMurojaah(session, payload) {
     return { success: false, message: 'ID santri tidak ditemukan' };
   }  const lock = LockService.getScriptLock();
   if (!acquireLock(lock)) {
-    return { success: false, message: 'Server sedang sibuk menyimpan data. Coba lagi sebentar.' };
+    return busyResponse();
   }
 
   try {
@@ -1413,117 +1765,111 @@ function santriConfirmMurojaah(session, payload) {
 }
 
 // Santri Submit Flashcard
+// v4.3: dibungkus withLock(). Ini penulisan PALING SERING di aplikasi (1x per
+// kartu flashcard) dan menyentuh Master_Hafalan + Gamifikasi + Badge, sehingga
+// tanpa lock bisa saling menimpa / menghasilkan XP tidak konsisten.
 function santriSubmitFlashcard(session, payload) {
   if (session.role !== 'santri' && session.role !== 'admin') {
-    return { success: false, message: 'Akses khusus Santri' };
+    return { success: false, code: 'E_FORBIDDEN', message: 'Akses khusus Santri' };
   }
 
   const santriId = session.role === 'santri' ? session.userId : session.idTerkait;
   if (!santriId) {
-    return { success: false, message: 'ID santri tidak ditemukan' };
-  }
-  const config = getConfigMap();
-
-  let recoveryAchieved = false;
-  if (payload.idMaster) {
-    const res = updateMasterHafalanCache(payload.idMaster, payload.isCorrect ? 'Lancar' : 'Tersendat', config);
-    if (res && res.recoveryAchieved) recoveryAchieved = true;
+    return { success: false, code: 'E_VALIDATION', message: 'ID santri tidak ditemukan' };
   }
 
-  const baseXP = payload.isCorrect ? 5 : 1;
-  // isQualifying=false: flashcard bukan misi Sabaq/Sabqi/Manzil, jadi sesuai
-  // PRD 13.3 jawaban flashcard menambah XP tetapi TIDAK menambah streak.
-  const gamifResult = awardXPAndQualifyingActivity(santriId, baseXP, 0, false, recoveryAchieved, config);
+  return withLock(function () {
+    const config = getConfigMap();
 
-  return {
-    success: true,
-    message: payload.isCorrect ? 'Jawaban Benar! +5 XP' : 'Tetap Semangat! +1 XP',
-    gamifikasi: gamifResult
-  };
+    let recoveryAchieved = false;
+    if (payload && payload.idMaster) {
+      const res = updateMasterHafalanCache(payload.idMaster, payload.isCorrect ? 'Lancar' : 'Tersendat', config);
+      if (res && res.recoveryAchieved) recoveryAchieved = true;
+    }
+
+    const baseXP = (payload && payload.isCorrect) ? 5 : 1;
+    // isQualifying=false: flashcard bukan misi Sabaq/Sabqi/Manzil, jadi sesuai
+    // PRD 13.3 jawaban flashcard menambah XP tetapi TIDAK menambah streak.
+    const gamifResult = awardXPAndQualifyingActivity(santriId, baseXP, 0, false, recoveryAchieved, config);
+
+    return {
+      success: true,
+      message: (payload && payload.isCorrect) ? 'Jawaban Benar! +5 XP' : 'Tetap Semangat! +1 XP',
+      gamifikasi: gamifResult
+    };
+  });
 }
 
 function markNotificationRead(session, notifId) {
-  if (!notifId) return { success: false, message: 'ID notifikasi wajib dikirim' };
+  if (!notifId) return { success: false, code: 'E_VALIDATION', message: 'ID notifikasi wajib dikirim' };
 
-  const lock = LockService.getScriptLock();
-  if (!acquireLock(lock)) {
-    return { success: false, message: 'Server sedang sibuk. Coba lagi sebentar.' };
-  }
-
-  try {
+  return withLock(function () {
     const notifSheet = getSheet('Notifikasi');
-    const data = notifSheet.getDataRange().getValues();
+    const data = readSheet_('Notifikasi', 6);
 
-    for (let i = 1; i < data.length; i++) {
+    for (let i = 0; i < data.length; i++) {
       if (String(data[i][0]) === String(notifId)) {
         // Otorisasi: notifikasi hanya boleh ditandai oleh pemiliknya.
         const owner = String(data[i][1]);
         const isOwner = owner === String(session.userId) || (!!session.idTerkait && owner === String(session.idTerkait));
         if (!isOwner) {
-          return { success: false, message: 'Notifikasi ini bukan milik akun Anda' };
+          return { success: false, code: 'E_FORBIDDEN', message: 'Notifikasi ini bukan milik akun Anda' };
         }
-        notifSheet.getRange(i + 1, 6).setValue('Sudah');
+        notifSheet.getRange(i + 2, 6).setValue('Sudah');
         return { success: true };
       }
     }
-    return { success: false, message: 'Notifikasi tidak ditemukan' };
-  } finally {
-    try { SpreadsheetApp.flush(); } catch (flushErr) { Logger.log('flush gagal: ' + flushErr); }
-    lock.releaseLock();
-  }
+    return { success: false, code: 'E_VALIDATION', message: 'Notifikasi tidak ditemukan' };
+  });
 }
 
 // --- 3. ORTU DASHBOARD & SMART RANDOM TEST ---
+
 function ortuGetDashboard(session) {
   if (session.role !== 'ortu' && session.role !== 'admin') {
-    return { success: false, message: 'Akses khusus Orang Tua' };
+    return { success: false, code: 'E_FORBIDDEN', message: 'Akses khusus Orang Tua' };
   }
 
   const santriId = session.idTerkait;
   if (!santriId) {
-    return { success: false, message: 'Akun ini belum terhubung ke data santri (ID_Terkait kosong)' };
+    return { success: false, code: 'E_VALIDATION', message: 'Akun ini belum terhubung ke data santri (ID_Terkait kosong)' };
   }
 
-  const ss = getSpreadsheet();
-  const santriSheet = ss.getSheetByName('Santri');
-  const masterSheet = ss.getSheetByName('Master_Hafalan');
-  const gamifSheet = ss.getSheetByName('Gamifikasi');
-  const tesSheet = ss.getSheetByName('Riwayat_Tes');
+  const cacheKey = dashCacheKey_('ortu', session.userId + ':' + santriId);
+  const cached = dashCacheGet_(cacheKey);
+  if (cached) return cached;
 
+  // Nama ananda
   let santriName = 'Ananda';
-  if (santriSheet) {
-    const sData = santriSheet.getDataRange().getValues();
-    for (let i = 1; i < sData.length; i++) {
-      if (String(sData[i][0]) === String(santriId)) {
-        santriName = sData[i][1];
-        break;
-      }
+  const santriRows = readSheet_('Santri', 4);
+  for (let i = 0; i < santriRows.length; i++) {
+    if (String(santriRows[i][0]) === String(santriId)) {
+      santriName = String(santriRows[i][1] || 'Ananda');
+      break;
     }
   }
 
-  // Retention breakdown
-  const masterData = masterSheet ? masterSheet.getDataRange().getValues() : [];
+  // Retention breakdown + daftar unit (dari indeks: Master_Hafalan dibaca sekali)
+  const units = buildMasterIndex_()[santriId] || [];
   let countHijau = 0;
   let countKuning = 0;
   let countMerah = 0;
   const unitList = [];
 
-  for (let i = 1; i < masterData.length; i++) {
-    if (String(masterData[i][1]) === String(santriId)) {
-      const status = masterData[i][7] || 'Hijau';
-      if (status === 'Hijau') countHijau++;
-      else if (status === 'Kuning') countKuning++;
-      else if (status === 'Merah') countMerah++;
+  for (let i = 0; i < units.length; i++) {
+    const status = units[i].retentionStatus || 'Hijau';
+    if (status === 'Hijau') countHijau++;
+    else if (status === 'Kuning') countKuning++;
+    else if (status === 'Merah') countMerah++;
 
-      unitList.push({
-        idMaster: masterData[i][0],
-        surah: masterData[i][2],
-        ayatMulai: masterData[i][3],
-        ayatAkhir: masterData[i][4],
-        retentionStatus: status,
-        nextReview: masterData[i][8]
-      });
-    }
+    unitList.push({
+      idMaster: units[i].idMaster,
+      surah: units[i].surah,
+      ayatMulai: units[i].ayatMulai,
+      ayatAkhir: units[i].ayatAkhir,
+      retentionStatus: status,
+      nextReview: units[i].nextReview
+    });
   }
 
   // Gamifikasi
@@ -1531,39 +1877,35 @@ function ortuGetDashboard(session) {
   let xp = 0;
   let level = 1;
   let longestStreak = 0;
-  if (gamifSheet) {
-    const gData = gamifSheet.getDataRange().getValues();
-    for (let i = 1; i < gData.length; i++) {
-      if (String(gData[i][0]) === String(santriId)) {
-        xp = Number(gData[i][1]) || 0;
-        level = Number(gData[i][2]) || 1;
-        streak = Number(gData[i][3]) || 0;
-        longestStreak = Number(gData[i][4]) || 0;
-        break;
-      }
+  const gamifRows = readSheet_('Gamifikasi', 6);
+  for (let i = 0; i < gamifRows.length; i++) {
+    if (String(gamifRows[i][0]) === String(santriId)) {
+      xp = Number(gamifRows[i][1]) || 0;
+      level = Number(gamifRows[i][2]) || 1;
+      streak = Number(gamifRows[i][3]) || 0;
+      longestStreak = Number(gamifRows[i][4]) || 0;
+      break;
     }
   }
 
-  // Recent test history
+  // Riwayat tes (maks 100 terbaru, urut terbaru lebih dahulu)
   const testHistory = [];
-  if (tesSheet) {
-    const tData = tesSheet.getDataRange().getValues();
-    for (let i = 1; i < tData.length; i++) {
-      if (String(tData[i][2]) === String(santriId)) {
-        testHistory.push({
-          idTes: tData[i][0],
-          tgl: toDateStr(tData[i][1]),
-          surah: tData[i][4],
-          ayatMulai: tData[i][5],
-          ayatAkhir: tData[i][6],
-          kualitas: tData[i][7],
-          pelapor: tData[i][8]
-        });
-      }
+  const tesRows = readSheet_('Riwayat_Tes', 9);
+  for (let i = 0; i < tesRows.length; i++) {
+    if (String(tesRows[i][2]) === String(santriId)) {
+      testHistory.push({
+        idTes: tesRows[i][0],
+        tgl: toDateStr(tesRows[i][1]),
+        surah: tesRows[i][4],
+        ayatMulai: tesRows[i][5],
+        ayatAkhir: tesRows[i][6],
+        kualitas: tesRows[i][7],
+        pelapor: tesRows[i][8]
+      });
     }
   }
 
-  return {
+  const result = {
     success: true,
     ortuName: session.nama,
     santriId: santriId,
@@ -1584,16 +1926,17 @@ function ortuGetDashboard(session) {
       streak: streak
     },
     unitList: unitList,
-    // Kirim riwayat lebih banyak agar filter bulan di klien berguna
-    // (UI tetap membatasi tampilan). Diurutkan terbaru lebih dulu.
     recentTests: testHistory.slice(-100).reverse()
   };
+
+  dashCachePut_(cacheKey, result, DASH_CACHE_TTL_SEC);
+  return result;
 }
 
 // Ortu Smart Random Test (PRD Section 12)
 function ortuGetRandomTest(session) {
   if (session.role !== 'ortu' && session.role !== 'admin') {
-    return { success: false, message: 'Akses khusus Orang Tua' };
+    return { success: false, code: 'E_FORBIDDEN', message: 'Akses khusus Orang Tua' };
   }
 
   const santriId = session.idTerkait;
@@ -1601,19 +1944,18 @@ function ortuGetRandomTest(session) {
     return { success: false, message: 'Akun ini belum terhubung ke data santri (ID_Terkait kosong)' };
   }
 
-  const masterSheet = getSheet('Master_Hafalan');
-  const masterData = masterSheet.getDataRange().getValues();
   const todayStr = appTodayStr();
+  const indexedUnits = buildMasterIndex_()[santriId] || [];
 
   const pool = [];
-  for (let i = 1; i < masterData.length; i++) {
-    if (String(masterData[i][1]) === String(santriId)) {
-      const diffDays = diffDaysFrom(masterData[i][5]);
+  for (let i = 0; i < indexedUnits.length; i++) {
+    const unitRow = indexedUnits[i];
+      const diffDays = diffDaysFrom(unitRow.tglMulai);
 
       // Keluarkan hafalan yang terlalu baru (<1 hari)
       if (diffDays >= 1) {
-        const status = masterData[i][7] || 'Hijau';
-        const nextReview = toDateStr(masterData[i][8]) || todayStr;
+        const status = unitRow.retentionStatus || 'Hijau';
+        const nextReview = unitRow.nextReview || todayStr;
         const isOverdue = nextReview <= todayStr;
 
         // Weighting: Merah / Overdue prioritas paling tinggi
@@ -1623,20 +1965,20 @@ function ortuGetRandomTest(session) {
         if (isOverdue) weight += 2;
 
         pool.push({
-          idMaster: masterData[i][0],
-          surah: masterData[i][2],
-          ayatMulai: masterData[i][3],
-          ayatAkhir: masterData[i][4],
+          idMaster: unitRow.idMaster,
+          surah: unitRow.surah,
+          ayatMulai: unitRow.ayatMulai,
+          ayatAkhir: unitRow.ayatAkhir,
           retentionStatus: status,
           weight: weight
         });
       }
-    }
   }
 
   if (pool.length === 0) {
     return {
       success: false,
+      code: 'E_VALIDATION',
       message: 'Belum ada hafalan yang memenuhi syarat untuk diuji (minimal berumur 1 hari).'
     };
   }
@@ -1673,7 +2015,7 @@ function ortuGetRandomTest(session) {
 // Ortu Submit Test Result (1-Click Evaluation)
 function ortuSubmitTestResult(session, payload) {
   if (session.role !== 'ortu' && session.role !== 'admin') {
-    return { success: false, message: 'Akses khusus Orang Tua' };
+    return { success: false, code: 'E_FORBIDDEN', message: 'Akses khusus Orang Tua' };
   }
 
   const santriId = session.idTerkait;
@@ -1681,7 +2023,7 @@ function ortuSubmitTestResult(session, payload) {
     return { success: false, message: 'Akun ini belum terhubung ke data santri (ID_Terkait kosong)' };
   }  const lock = LockService.getScriptLock();
   if (!acquireLock(lock)) {
-    return { success: false, message: 'Server sedang sibuk menyimpan data. Coba lagi sebentar.' };
+    return busyResponse();
   }
 
   try {
@@ -1740,43 +2082,67 @@ function ortuSubmitTestResult(session, payload) {
 }
 
 // Ortu Kirim Apresiasi
+// v4.3: memakai withLock() — sebelumnya endpoint tulis ini tanpa lock,
+// tidak konsisten dengan endpoint tulis lain (risiko tulis hilang saat ramai).
 function ortuSendApresiasi(session, payload) {
   if (session.role !== 'ortu' && session.role !== 'admin') {
-    return { success: false, message: 'Akses khusus Orang Tua' };
+    return { success: false, code: 'E_FORBIDDEN', message: 'Akses khusus Orang Tua' };
   }
 
   const santriId = session.idTerkait;
   if (!santriId) {
-    return { success: false, message: 'Akun ini belum terhubung ke data santri (ID_Terkait kosong)' };
+    return { success: false, code: 'E_VALIDATION', message: 'Akun ini belum terhubung ke data santri (ID_Terkait kosong)' };
   }
 
-  const notifSheet = getSheet('Notifikasi');
-  const todayStr = appTodayStr();
+  return withLock(function () {
+    const notifSheet = getSheet('Notifikasi');
+    const todayStr = appTodayStr();
 
-  notifSheet.appendRow([
-    Utilities.getUuid(),
-    santriId,
-    'Apresiasi Ortu',
-    `Pesan Semangat dari Orang Tua (${session.nama}): "${payload.pesan || 'Semangat terus menghafal ya Ananda, Ayah & Bunda selalu mendoakan!'}" ❤️`,
-    todayStr,
-    'Belum'
-  ]);
+    notifSheet.appendRow([
+      Utilities.getUuid(),
+      santriId,
+      'Apresiasi Ortu',
+      `Pesan Semangat dari Orang Tua (${session.nama}): "${payload.pesan || 'Semangat terus menghafal ya Ananda, Ayah & Bunda selalu mendoakan!'}" ❤️`,
+      todayStr,
+      'Belum'
+    ]);
 
-  return { success: true, message: 'Pesan apresiasi berhasil dikirim ke Ananda!' };
+    return { success: true, message: 'Pesan apresiasi berhasil dikirim ke Ananda!' };
+  });
 }
 
 // ============================================================
 // QURAN API & AYAH CACHE
 // ============================================================
 
+/**
+ * Tulis 1 baris cache ayat bila belum ada — dijalankan di dalam lock singkat.
+ * Lock hanya membungkus "cek + tulis" (bukan fetch jaringan) agar antrean tulis
+ * tidak tertahan oleh lamanya respons provider eksternal.
+ */
+function appendAyahCacheIfMissing(cacheSheet, surah, ayahNum, arabicText, audioUrl, translationText) {
+  return withLock(function () {
+    const rows = cacheSheet.getRange(1, 1, Math.max(1, cacheSheet.getLastRow()), 6).getValues();
+    for (let i = 1; i < rows.length; i++) {
+      if (String(rows[i][0]) === String(surah) && Number(rows[i][1]) === Number(ayahNum)) {
+        return { success: true, skipped: true }; // sudah ada -> tidak menulis ulang
+      }
+    }
+    cacheSheet.appendRow([surah, ayahNum, arabicText, audioUrl, new Date().toISOString(), translationText]);
+    return { success: true };
+  });
+}
+
 function getAyahContent(surah, ayah) {
   const ayahNum = Number(ayah);
   if (!ayahNum || ayahNum < 1) {
-    return { success: false, message: 'Nomor ayat tidak valid' };
-  }  const cacheSheet = getSheet('Cache_Ayat');
-  const cacheData = cacheSheet.getDataRange().getValues();
+    return { success: false, code: 'E_VALIDATION', message: 'Nomor ayat tidak valid' };
+  }
+  const cacheSheet = getSheet('Cache_Ayat');
+  const cacheData = readSheet_('Cache_Ayat', 6);
+  const cacheRowOffset = 2; // readSheet_ mulai dari baris 2 (setelah header)
 
-  for (let i = 1; i < cacheData.length; i++) {
+  for (let i = 0; i < cacheData.length; i++) {
     if (String(cacheData[i][0]) === String(surah) && Number(cacheData[i][1]) === ayahNum) {
       const cachedArabic = cacheData[i][2] || '';
       const cachedAudio = cacheData[i][3] || '';
@@ -1820,6 +2186,7 @@ function getAyahContent(surah, ayah) {
         if (!target) {
           return {
             success: false,
+            code: 'E_VALIDATION',
             message: `Ayat ${ayahNum} tidak ditemukan pada surah ${surahNumber}`
           };
         }
@@ -1833,8 +2200,10 @@ function getAyahContent(surah, ayah) {
           ? target.audio['01']
           : (resJson.data.audioFull ? resJson.data.audioFull['01'] : '');
 
-        // Simpan ke Cache_Ayat (kolom 6: Teks_Indonesia, opsional).
-        cacheSheet.appendRow([surah, ayahNum, arabicText, audioUrl, new Date().toISOString(), translationText]);
+        // Simpan ke Cache_Ayat di dalam lock singkat + cek ulang, supaya dua
+        // request bersamaan untuk ayat yang sama tidak menghasilkan baris cache
+        // kembar (dulu appendRow langsung tanpa lock).
+        appendAyahCacheIfMissing(cacheSheet, surah, ayahNum, arabicText, audioUrl, translationText);
 
         return {
           success: true,
@@ -1858,8 +2227,387 @@ function getAyahContent(surah, ayah) {
     success: false,
     surah: surah,
     ayah: ayahNum,
+    code: 'E_UPSTREAM',
     message: 'Teks ayat belum tersedia (cache kosong & provider eksternal tidak merespons)'
   };
+}
+
+// ============================================================
+// ARSIP OTOMATIS RIWAYAT LAMA (PRD Section 15 & 17)
+// ============================================================
+// Sheet histori (Murojaah, Riwayat_Tes, Notifikasi) tumbuh selamanya. Karena
+// setiap pembacaan memakai getRange, ukuran sheet = ongkos. Arsip memindahkan
+// baris lama ke sheet 'Arsip_<nama>' (atau spreadsheet arsip terpisah) sehingga
+// sheet aktif tetap ramping.
+//
+// Aturan keselamatan (penting — jangan diubah tanpa alasan):
+//   1) DEFAULT = UJI KERING. Tanpa argumen, fungsi ini hanya MELAPORKAN apa yang
+//      akan dipindahkan; tidak menulis dan tidak menghapus apa pun.
+//   2) Penghapusan hanya dilakukan SETELAH penulisan arsip terverifikasi
+//      (jumlah baris bertambah tepat sebanyak data yang ditulis).
+//   3) Notifikasi hanya diarsipkan bila Status_Baca = 'Sudah' — yang belum dibaca
+//      tidak boleh hilang dari pandangan santri.
+//   4) Seluruh operasi tulis berjalan di dalam withLock() + flush().
+//   5) Arsip otomatis pada batch malam tetap uji kering sampai pemilik sistem
+//      menyalakan Config ARCHIVE_AKTIF = 1.
+
+const PROP_LAST_ARCHIVE_RUN = 'SYNC_STATE_LAST_ARCHIVE_RUN';
+
+const ARCHIVE_SHEET_SPECS = [
+  { name: 'Murojaah', cols: 7, dateIndex: 1 },
+  { name: 'Riwayat_Tes', cols: 9, dateIndex: 1 },
+  // Notifikasi: hanya yang sudah dibaca (readIndex = kolom Status_Baca).
+  { name: 'Notifikasi', cols: 6, dateIndex: 4, onlyRead: true, readIndex: 5 }
+];
+
+/**
+ * Tanggal awal bulan N bulan sebelum sebuah tanggal (YYYY-MM-DD).
+ * Dipakai sebagai batas arsip: baris dengan tanggal < batas dianggap lama.
+ * Fungsi ini MURNI (tanpa API Google) sehingga bisa diuji unit di luar GAS.
+ *
+ * @param {string} dateStr tanggal sumber (YYYY-MM-DD)
+ * @param {number} months jumlah bulan ke belakang
+ * @returns {string} YYYY-MM-01, atau '' bila tanggal tidak valid
+ */
+function monthsAgoFrom_(dateStr, months) {
+  const m = String(dateStr || '').slice(0, 10).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return '';
+  let tahun = Number(m[1]);
+  let bulan = Number(m[2]) - (Number(months) || 0);
+  while (bulan <= 0) { bulan += 12; tahun -= 1; }
+  const bulanStr = (bulan < 10 ? '0' : '') + bulan;
+  return tahun + '-' + bulanStr + '-01';
+}
+
+/**
+ * Tentukan tujuan arsip. Bila Script Property SPREADSHEET_ID_ARSIP diisi,
+ * arsip ditulis ke spreadsheet terpisah; bila tidak, ke sheet 'Arsip_*' di
+ * spreadsheet yang sama (tidak perlu konfigurasi tambahan).
+ */
+function getArchiveTarget_() {
+  const id = readScriptProperty_('SPREADSHEET_ID_ARSIP');
+  if (id && id.length > 5) {
+    try {
+      return { ss: SpreadsheetApp.openById(id), label: 'Spreadsheet arsip terpisah (SPREADSHEET_ID_ARSIP)', external: true };
+    } catch (e) {
+      Logger.log('Spreadsheet arsip tidak bisa dibuka, memakai sheets Arsip_* lokal: ' + e);
+    }
+  }
+  return { ss: getSpreadsheet(), label: 'Sheet Arsip_* di spreadsheet yang sama', external: false };
+}
+
+/** Pastikan sheet arsip ada dan berheader sama dengan sheet sumber. */
+function ensureArchiveSheet_(ss, sourceName, cols) {
+  const archiveName = 'Arsip_' + sourceName;
+  const header = getSheet(sourceName).getRange(1, 1, 1, cols).getValues()[0];
+  let sheet = ss.getSheetByName(archiveName);
+  if (!sheet) {
+    sheet = ss.insertSheet(archiveName);
+    sheet.getRange(1, 1, 1, cols).setValues([header]);
+    sheet.setFrozenRows(1);
+    return sheet;
+  }
+  if (sheet.getLastRow() === 0) {
+    sheet.getRange(1, 1, 1, cols).setValues([header]);
+  }
+  return sheet;
+}
+
+/**
+ * Hapus baris dari BAWAH ke atas dalam blok kontigu. Menghapus dari atas akan
+ * menggeser nomor baris berikutnya; urutan ini mencegah baris salah terhapus.
+ * @param {Sheet} sheet
+ * @param {number[]} rowNumbers nomor baris sheet (1-based), urut menaik
+ */
+function deleteRowBlocks_(sheet, rowNumbers) {
+  let i = rowNumbers.length - 1;
+  while (i >= 0) {
+    const end = rowNumbers[i];
+    let start = end;
+    while (i - 1 >= 0 && rowNumbers[i - 1] === start - 1) {
+      i--;
+      start = rowNumbers[i];
+    }
+    sheet.deleteRows(start, end - start + 1);
+    i--;
+  }
+}
+
+/**
+ * Pintu masuk arsip. TANPA argumen = uji kering (aman, read-only).
+ * Pemakaian:
+ *   archiveOldRows()                          → laporan uji kering
+ *   archiveOldRows({ dryRun: false })          → benar-benar memindahkan
+ *   archiveOldRows({ bulan: 3 })               → batas arsip 3 bulan
+ */
+function archiveOldRows(options) {
+  const opts = options || {};
+  if (opts.dryRun !== false) return archiveOldRowsRun_(opts, true);
+  return withLock(function () { return archiveOldRowsRun_(opts, false); });
+}
+
+/** Implementasi inti arsip (dipanggil dari archiveOldRows). */
+function archiveOldRowsRun_(opts, dryRun) {
+  const config = getConfigMap();
+  const bulan = Number(opts.bulan || config.ARCHIVE_AMBANG_BULAN || 6);
+  const cutoff = monthsAgoFrom_(appTodayStr(), bulan);
+  if (!cutoff) {
+    return { success: false, code: 'E_UNKNOWN', message: 'Batas arsip tidak bisa dihitung dari tanggal hari ini.' };
+  }
+
+  const target = getArchiveTarget_();
+  const report = {
+    success: true,
+    dryRun: dryRun,
+    bulan: bulan,
+    cutoff: cutoff,
+    target: target.label,
+    sheets: {},
+    totalDitemukan: 0,
+    totalDiarsipkan: 0,
+    totalDihapus: 0,
+    warnings: []
+  };
+
+  for (let s = 0; s < ARCHIVE_SHEET_SPECS.length; s++) {
+    const spec = ARCHIVE_SHEET_SPECS[s];
+    let sheet;
+    try {
+      sheet = getSheet(spec.name);
+    } catch (e) {
+      // Sheet tidak ada di instalasi ini → lewati, jangan gagalkan seluruh arsip.
+      report.warnings.push('Sheet ' + spec.name + ' tidak ditemukan — dilewati.');
+      report.sheets[spec.name] = { ditemukan: 0, diarsipkan: 0, dihapus: 0, catatan: 'sheet tidak ditemukan' };
+      continue;
+    }
+    const lastRow = sheet.getLastRow();
+    if (lastRow < 2) {
+      report.sheets[spec.name] = { ditemukan: 0, diarsipkan: 0, dihapus: 0, catatan: 'sheet kosong' };
+      continue;
+    }
+
+    const rows = sheet.getRange(2, 1, lastRow - 1, spec.cols).getValues();
+    const kandidat = [];
+    for (let i = 0; i < rows.length; i++) {
+      const tgl = toDateStr(rows[i][spec.dateIndex]);
+      if (!tgl || tgl >= cutoff) continue; // tanggal kosong / masih periode aktif
+      if (spec.onlyRead && String(rows[i][spec.readIndex] || '') !== 'Sudah') continue;
+      kandidat.push({ rowNumber: i + 2, values: rows[i] });
+    }
+
+    report.totalDitemukan += kandidat.length;
+    if (kandidat.length === 0) {
+      report.sheets[spec.name] = { ditemukan: 0, diarsipkan: 0, dihapus: 0 };
+      continue;
+    }
+
+    if (dryRun) {
+      report.sheets[spec.name] = { ditemukan: kandidat.length, diarsipkan: 0, dihapus: 0, catatan: 'uji kering — tidak ada yang diubah' };
+      continue;
+    }
+
+    let archSheet;
+    try {
+      archSheet = ensureArchiveSheet_(target.ss, spec.name, spec.cols);
+    } catch (e) {
+      report.warnings.push('Gagal menyiapkan arsip ' + spec.name + ': ' + e);
+      report.sheets[spec.name] = { ditemukan: kandidat.length, diarsipkan: 0, dihapus: 0, catatan: 'dibatalkan' };
+      continue;
+    }
+
+    const values = kandidat.map(function (k) { return k.values; });
+    const sebelum = archSheet.getLastRow();
+    try {
+      archSheet.getRange(sebelum + 1, 1, values.length, spec.cols).setValues(values);
+      SpreadsheetApp.flush();
+    } catch (e) {
+      report.warnings.push('Gagal menulis arsip ' + spec.name + ': ' + e);
+      report.sheets[spec.name] = { ditemukan: kandidat.length, diarsipkan: 0, dihapus: 0, catatan: 'dibatalkan' };
+      continue;
+    }
+
+    // Verifikasi sebelum menghapus — bila tidak cocok, TIDAK ada yang dihapus.
+    const sesudah = archSheet.getLastRow();
+    if (sesudah - sebelum !== values.length) {
+      report.warnings.push('Arsip ' + spec.name + ' tidak terverifikasi (' + (sesudah - sebelum) + ' dari ' + values.length + ' baris) — penghapusan dibatalkan.');
+      report.sheets[spec.name] = { ditemukan: kandidat.length, diarsipkan: sesudah - sebelum, dihapus: 0, catatan: 'dibatalkan' };
+      continue;
+    }
+
+    const rowNumbers = kandidat.map(function (k) { return k.rowNumber; });
+    deleteRowBlocks_(sheet, rowNumbers);
+    SpreadsheetApp.flush();
+
+    report.sheets[spec.name] = { ditemukan: kandidat.length, diarsipkan: values.length, dihapus: rowNumbers.length };
+    report.totalDiarsipkan += values.length;
+    report.totalDihapus += rowNumbers.length;
+  }
+
+  writeScriptProperty_(PROP_LAST_ARCHIVE_RUN, JSON.stringify({
+    at: new Date().toISOString(),
+    dryRun: dryRun,
+    cutoff: cutoff,
+    ditemukan: report.totalDitemukan,
+    dihapus: report.totalDihapus
+  }));
+
+  if (!dryRun && report.totalDihapus > 0) bumpDashVersion_();
+  return report;
+}
+
+// ============================================================
+// DIAGNOSTIK SISTEM (read-only) — selfTest() & health_check
+// ============================================================
+
+/**
+ * Kumpulkan status sistem tanpa mengubah apa pun. Dipakai oleh selfTest()
+ * (dijalankan dari editor Apps Script) dan health_check (lewat HTTP, ustaz).
+ */
+function systemDiagnostics_() {
+  const out = {
+    appVersion: APP_VERSION,
+    timezone: APP_TIMEZONE,
+    spreadsheetId: SPREADSHEET_ID ? (SPREADSHEET_ID.slice(0, 6) + '…(disembunyikan)') : '(belum diisi)',
+    archiveTarget: getArchiveTarget_().label,
+    trigger: { installed: false, handler: 'runNightlyRetentionRecompute' },
+    lastNightlyRun: readScriptProperty_(PROP_LAST_NIGHTLY_RUN) || '(belum pernah)',
+    lastArchiveRun: readScriptProperty_(PROP_LAST_ARCHIVE_RUN) || '(belum pernah)',
+    config: {},
+    sheets: {},
+    duplikat: {},
+    warnings: []
+  };
+
+  try {
+    const triggers = ScriptApp.getProjectTriggers();
+    for (let i = 0; i < triggers.length; i++) {
+      if (triggers[i].getHandlerFunction() === 'runNightlyRetentionRecompute') out.trigger.installed = true;
+    }
+  } catch (e) {
+    out.warnings.push('Tidak bisa membaca daftar trigger: ' + e);
+  }
+  if (!out.trigger.installed) {
+    out.warnings.push('Trigger malam TIDAK terpasang: pembersihan sesi, downgrade retensi, dan arsip tidak berjalan. Jalankan installNightlyTrigger() dari editor (atau login sekali agar dipasang otomatis).');
+  }
+  if (out.lastNightlyRun === '(belum pernah)') {
+    out.warnings.push('Batch malam belum pernah tercatat berjalan.');
+  }
+
+  // Config efektif (nilai penting saja)
+  try {
+    const cfg = getConfigMap();
+    ['ARCHIVE_AMBANG_BULAN', 'ARCHIVE_AKTIF', 'SESSION_EXPIRY_JAM', 'AMBANG_SABQI_HARI',
+      'INTERVAL_CAP_MAKS_HARI', 'RECOVERY_LANCAR_BERUNTUN_DIBUTUHKAN'].forEach(function (k) {
+        out.config[k] = cfg[k];
+      });
+  } catch (e) {
+    out.warnings.push('Config tidak bisa dibaca: ' + e);
+  }
+
+  // Jumlah baris sheet kunci
+  ['Users', 'Santri', 'Target', 'Hafalan', 'Master_Hafalan', 'Murojaah', 'Riwayat_Tes',
+    'Gamifikasi', 'Badge', 'Notifikasi', 'Feedback', 'Sessions', 'Cache_Ayat'].forEach(function (name) {
+      try { out.sheets[name] = Math.max(0, getSheet(name).getLastRow() - 1); }
+      catch (e) { out.sheets[name] = -1; }
+    });
+
+  // Pemeriksaan header kolom aditif (mudah terlewat saat migrasi manual)
+  try {
+    const masterHeader = getSheet('Master_Hafalan').getRange(1, 1, 1, 12).getValues()[0];
+    if (String(masterHeader[11] || '') !== 'Consecutive_Lancar') {
+      out.warnings.push('Header Master_Hafalan kolom ke-12 bukan "Consecutive_Lancar" — Recovery Policy (Merah→Kuning 2x Lancar) tidak akan tercatat. Lihat SetupGuide bagian migrasi.');
+    }
+    const cacheHeader = getSheet('Cache_Ayat').getRange(1, 1, 1, 6).getValues()[0];
+    if (String(cacheHeader[5] || '') !== 'Teks_Indonesia') {
+      out.warnings.push('Header Cache_Ayat kolom ke-6 bukan "Teks_Indonesia" — terjemahan ayat tidak akan tersimpan.');
+    }
+  } catch (e) {
+    out.warnings.push('Pemeriksaan header gagal: ' + e);
+  }
+
+  // Duplikat data (sumber bug "data dobel" dari versi lama)
+  try {
+    const targetRows = readSheet_('Target', 6);
+    const seenTarget = {};
+    let dupTarget = 0;
+    for (let i = 0; i < targetRows.length; i++) {
+      const key = String(targetRows[i][2]) + '|' + String(targetRows[i][1]);
+      if (seenTarget[key]) dupTarget++; else seenTarget[key] = true;
+    }
+    out.duplikat.target_santri_bulan = dupTarget;
+    if (dupTarget > 0) out.warnings.push('Ada ' + dupTarget + ' baris Target kembar (santri+bulan sama) — target bisa tampil tidak konsisten.');
+
+    const masterRows = readSheet_('Master_Hafalan', 12);
+    const seenUnit = {};
+    let dupUnit = 0;
+    for (let i = 0; i < masterRows.length; i++) {
+      const key = String(masterRows[i][1]) + '|' + String(masterRows[i][2]).replace(/[^a-z0-9]/gi, '').toLowerCase() +
+        '|' + String(masterRows[i][3]) + '|' + String(masterRows[i][4]);
+      if (seenUnit[key]) dupUnit++; else seenUnit[key] = true;
+    }
+    out.duplikat.unit_hafalan = dupUnit;
+    if (dupUnit > 0) out.warnings.push('Ada ' + dupUnit + ' unit Master_Hafalan kembar (santri+surah+ayat sama) — pertimbangkan penggabungan.');
+
+    const userRows = readSheet_('Users', 6);
+    const seenUser = {};
+    let dupUser = 0;
+    for (let i = 0; i < userRows.length; i++) {
+      const key = String(userRows[i][1] || '').toLowerCase();
+      if (!key) continue;
+      if (seenUser[key]) dupUser++; else seenUser[key] = true;
+    }
+    out.duplikat.username = dupUser;
+    if (dupUser > 0) out.warnings.push('Ada ' + dupUser + ' username kembar di sheet Users.');
+  } catch (e) {
+    out.warnings.push('Pemeriksaan duplikat gagal: ' + e);
+  }
+
+  // Kesehatan sheet Sessions (paling sering jadi sumber perlambatan)
+  try {
+    const sessionRows = readSheet_('Sessions', 6);
+    const now = Date.now();
+    let expired = 0;
+    const seenToken = {};
+    let dupToken = 0;
+    for (let i = 0; i < sessionRows.length; i++) {
+      const exp = new Date(sessionRows[i][3]);
+      if (!isNaN(exp.getTime()) && exp.getTime() < now) expired++;
+      const t = String(sessionRows[i][0] || '');
+      if (t) { if (seenToken[t]) dupToken++; else seenToken[t] = true; }
+    }
+    out.sessionsExpired = expired;
+    out.duplikat.token_sesi = dupToken;
+    if (expired > 0) {
+      out.warnings.push('Ada ' + expired + ' sesi kedaluwarsa yang belum dibersihkan (dibersihkan otomatis oleh trigger malam / saat token dipakai).');
+    }
+    if (sessionRows.length > 500) {
+      out.warnings.push('Sheet Sessions berisi ' + sessionRows.length + ' baris — periksa apakah trigger malam berjalan.');
+    }
+  } catch (e) {
+    out.warnings.push('Pemeriksaan sesi gagal: ' + e);
+  }
+
+  // Ukuran sheet histori → sarankan arsip
+  const besar = Object.keys(out.sheets).filter(function (k) {
+    return ['Murojaah', 'Riwayat_Tes', 'Notifikasi', 'Cache_Ayat'].indexOf(k) !== -1 && out.sheets[k] > 5000;
+  });
+  if (besar.length > 0) {
+    out.warnings.push('Sheet histori besar (' + besar.join(', ') + ' > 5.000 baris). Jalankan archiveOldRows() untuk melihat rencana arsip (uji kering).');
+  }
+
+  return out;
+}
+
+/**
+ * Uji mandiri sistem — jalankan dari editor Apps Script (dropdown fungsi →
+ * selfTest → Run). Tidak mengubah data apa pun, aman dijalankan kapan saja.
+ * Hasil lengkap (termasuk rencana arsip) dicatat ke Executions log.
+ */
+function selfTest() {
+  const report = systemDiagnostics_();
+  report.arsipRencana = archiveOldRows({ dryRun: true });
+  Logger.log(JSON.stringify(report, null, 2));
+  return report;
 }
 
 // ============================================================
@@ -1868,7 +2616,7 @@ function getAyahContent(surah, ayah) {
 
 function runNightlyRetentionRecompute() {
   const masterSheet = getSheet('Master_Hafalan');
-  const masterData = masterSheet.getDataRange().getValues();
+  const masterData = readSheet_('Master_Hafalan', 12);
   const todayDateStr = appTodayStr();
 
   // Downgrade terjadwal: unit Hijau yang jadwal reviewnya terlewat >= 3 hari -> Kuning.
@@ -1876,7 +2624,7 @@ function runNightlyRetentionRecompute() {
   const statusColumn = [];
   let changed = false;
 
-  for (let i = 1; i < masterData.length; i++) {
+  for (let i = 0; i < masterData.length; i++) {
     const nextReview = toDateStr(masterData[i][8]);
     const currentStatus = masterData[i][7] || 'Hijau';
     let newStatus = currentStatus;
@@ -1897,15 +2645,16 @@ function runNightlyRetentionRecompute() {
   // Bersihkan token sesi kedaluwarsa — batch: kumpulkan blok baris kontigu,
   // lalu hapus sekali deleteRows per blok (bukan deleteRow per baris).
   const sessionSheet = getSheet('Sessions');
-  const sessionData = sessionSheet.getDataRange().getValues();
+  const sessionData = readSheet_('Sessions', 6);
   const now = new Date();
   let blockStart = -1;
   let blockEnd = -1;
-  for (let j = sessionData.length - 1; j >= 1; j--) {
+  // Index 0 = baris sheet ke-2 -> nomor baris = j + 2.
+  for (let j = sessionData.length - 1; j >= 0; j--) {
     const expiry = new Date(sessionData[j][3]);
     const expired = !isNaN(expiry.getTime()) && expiry < now;
     if (expired) {
-      const row = j + 1;
+      const row = j + 2;
       if (blockEnd === -1) {
         blockStart = row;
         blockEnd = row;
@@ -1921,6 +2670,33 @@ function runNightlyRetentionRecompute() {
   if (blockEnd !== -1) {
     sessionSheet.deleteRows(blockStart, blockEnd - blockStart + 1);
   }
+  bumpDashVersion_(); // data berubah -> cache dashboard dibuang
+
+  // Arsip riwayat lama. Aman secara default: hanya UJI KERING sampai pemilik
+  // sistem menyetel Config ARCHIVE_AKTIF = 1 (lihat komentar archiveOldRows).
+  let archiveInfo = null;
+  try {
+    const cfgArsip = getConfigMap();
+    const arsipAktif = String(cfgArsip.ARCHIVE_AKTIF || '0') === '1';
+    const hasilArsip = archiveOldRows({ dryRun: !arsipAktif });
+    archiveInfo = (hasilArsip && hasilArsip.success === false)
+      ? { error: hasilArsip.code || 'E_BUSY' } // mis. lock dipakai user: coba lagi malam berikutnya
+      : {
+        dryRun: hasilArsip.dryRun,
+        cutoff: hasilArsip.cutoff,
+        ditemukan: hasilArsip.totalDitemukan,
+        dihapus: hasilArsip.totalDihapus
+      };
+  } catch (e) {
+    Logger.log('arsip otomatis gagal (diabaikan): ' + e);
+    archiveInfo = { error: String(e) };
+  }
+
+  // Catat jejak eksekusi agar healthCheck() bisa membuktikan batch benar-benar
+  // berjalan (dulu tidak ada jejak apa pun, sehingga "trigger lupa dipasang"
+  // tidak terdeteksi sampai sistem terasa lambat).
+  writeScriptProperty_(PROP_LAST_NIGHTLY_RUN, new Date().toISOString());
+  return { success: true, ranAt: readScriptProperty_(PROP_LAST_NIGHTLY_RUN), archive: archiveInfo };
 }
 
 // Install Trigger otomatis setiap jam 01:00 malam
@@ -1937,6 +2713,55 @@ function installNightlyTrigger() {
     .everyDays(1)
     .atHour(1)
     .create();
+
+  writeScriptProperty_(PROP_TRIGGER_FLAG, new Date().toISOString());
+  return { success: true, message: 'Trigger malam tiap 01:00 terpasang.' };
+}
+
+/**
+ * Pastikan trigger malam terpasang TANPA perlu langkah manual di editor.
+ * Dipanggil setiap login sukses (frekuensi rendah) dan idempoten:
+ * bila penanda sudah ada, fungsi ini tidak melakukan apa-apa.
+ *
+ * Latar belakang: sebelumnya installNightlyTrigger() tidak dipanggil dari mana
+ * pun, sehingga sheet Sessions tak pernah dibersihkan dan validateSession makin
+ * lambat — salah satu pemicu lingkaran "putus/nyambung".
+ */
+function ensureNightlyTrigger() {
+  try {
+    if (readScriptProperty_(PROP_TRIGGER_FLAG)) return false; // sudah pernah dipasang
+
+    const triggers = ScriptApp.getProjectTriggers();
+    for (let i = 0; i < triggers.length; i++) {
+      if (triggers[i].getHandlerFunction() === 'runNightlyRetentionRecompute') {
+        writeScriptProperty_(PROP_TRIGGER_FLAG, new Date().toISOString());
+        return false;
+      }
+    }
+
+    installNightlyTrigger();
+    Logger.log('Trigger malam otomatis dipasang (ensureNightlyTrigger).');
+    return true;
+  } catch (e) {
+    // Jangan pernah menggagalkan login hanya karena trigger tidak bisa dipasang.
+    Logger.log('ensureNightlyTrigger gagal (diabaikan): ' + e);
+    return false;
+  }
+}
+
+/**
+ * Status kesehatan sistem — untuk menjawab "kenapa lambat / data tidak terlihat".
+ * Panggil dari editor Apps Script, atau lewat action 'health_check' (khusus ustaz).
+ */
+function healthCheck(session) {
+  // Satu sumber diagnostik dengan selfTest(): versi, trigger, ukuran sheet,
+  // duplikat data, dan peringatan tindakan yang perlu dilakukan.
+  if (session && session.role !== 'ustaz' && session.role !== 'admin') {
+    return { success: false, code: 'E_FORBIDDEN', message: 'Akses khusus Ustaz' };
+  }
+  const report = systemDiagnostics_();
+  report.success = true;
+  return report;
 }
 
 // ============================================================
@@ -1963,7 +2788,8 @@ function setupInitialDatabase() {
     ['XP_BONUS_LANCAR', 5, 'Bonus XP hasil lancar'],
     ['XP_BONUS_RECOVERY', 15, 'Bonus XP pemulihan merah ke kuning'],
     ['SESSION_EXPIRY_JAM', 24, 'Masa berlaku token sesi (jam)'],
-    ['ARCHIVE_AMBANG_BULAN', 6, 'Ambang waktu arsip riwayat']
+    ['ARCHIVE_AMBANG_BULAN', 6, 'Ambang waktu arsip riwayat'],
+    ['ARCHIVE_AKTIF', 0, '1 = arsip otomatis aktif; 0 = uji kering saja'],
   ];
   configs.forEach(row => configSheet.appendRow(row));
 

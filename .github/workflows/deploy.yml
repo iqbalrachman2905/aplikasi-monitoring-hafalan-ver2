@@ -1,11 +1,14 @@
 name: Deploy to GitHub Pages
 
 # Deploy aplikasi static (HTML + CSS + JS murni, tanpa build step)
-# Folder yang di-deploy: quran-retention-app/
+# Folder yang di-deploy: quran-retention-app/ (TANPA folder backend/ & dokumen internal)
 # URL live: https://iqbalrachman2905.github.io/aplikasi-monitoring-hafalan-ver2/
 
 on:
   push:
+    branches:
+      - main
+  pull_request:
     branches:
       - main
   workflow_dispatch: # tombol "Run workflow" manual dari tab Actions
@@ -22,7 +25,34 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # 1. Verifikasi: sintaks, paritas mock↔backend, dan uji lapisan API.
+  #    Sebelumnya CI hanya men-deploy, sehingga regresi bisa lolos ke produksi.
+  # ---------------------------------------------------------------------------
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Cek sintaks + paritas API
+        run: npm run check
+
+      - name: Uji lapisan API (mock, taksonomi error, anti-data-dobel)
+        run: npm test
+
+  # ---------------------------------------------------------------------------
+  # 2. Deploy ke GitHub Pages
+  # ---------------------------------------------------------------------------
   deploy:
+    needs: verify
+    # Hanya deploy dari main (PR hanya menjalankan verifikasi).
+    if: github.event_name != 'pull_request'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -34,12 +64,24 @@ jobs:
       - name: Setup Pages
         uses: actions/configure-pages@v5
 
-      - name: Upload artifact (folder quran-retention-app)
+      # Folder backend/ berisi ID spreadsheet & panduan setup; dokumen kerja
+      # juga tidak perlu publik. Keduanya dikeluarkan dari artifact Pages
+      # (dulu seluruh folder quran-retention-app/ ikut terbit apa adanya).
+      - name: Siapkan artifact statis (tanpa backend & dokumen internal)
+        run: |
+          mkdir -p _site
+          rsync -a \
+            --exclude 'backend/' \
+            --exclude '*.md' \
+            --exclude '*.txt' \
+            quran-retention-app/ _site/
+          echo "Isi artifact:"; find _site -maxdepth 2 -type f | sort
+
+      - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: quran-retention-app
+          path: _site
 
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
-

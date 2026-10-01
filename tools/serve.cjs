@@ -18,6 +18,9 @@ const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..', 'quran-retention-app');
 const START_PORT = Number(process.env.PORT) || 8080;
+// Host binding dev server. Default 0.0.0.0 agar bisa diakses dari perangkat
+// lain / pratinjau jarak jauh. Set HOST=127.0.0.1 bila ingin terbatas lokal.
+const HOST = process.env.HOST || '0.0.0.0';
 const MAX_PORT_TRIES = 10;
 
 const MIME = {
@@ -96,7 +99,7 @@ server.on('error', (err) => {
     tries++;
     port++;
     console.log(`Port ${port - 1} terpakai, mencoba port ${port}...`);
-    server.listen(port, '127.0.0.1');
+    server.listen(port, HOST);
   } else {
     console.error('Gagal menjalankan server:', err.message);
     process.exit(1);
@@ -106,10 +109,10 @@ server.on('error', (err) => {
 server.on('listening', () => {
   console.log('');
   console.log('  📖 Mutaba\'ah Hafalan — server lokal aktif');
-  console.log(`  ➜  http://127.0.0.1:${port}/`);
+  console.log(`  ➜  http://localhost:${port}/  (bind: ${HOST})`);
   console.log(`  📂 Menyajikan: ${ROOT}`);
   console.log('  Tekan Ctrl+C untuk berhenti.');
   console.log('');
 });
 
-server.listen(port, '127.0.0.1');
+server.listen(port, HOST);
