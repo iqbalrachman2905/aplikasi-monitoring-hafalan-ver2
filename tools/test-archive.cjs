@@ -120,6 +120,8 @@ function resetRows() {
   };
   SHEETS = {};
   Object.keys(ROWS).forEach(n => { SHEETS[n] = makeSheet(n, ROWS[n]); });
+  if (typeof PROP !== 'undefined') Object.keys(PROP).forEach(k => { delete PROP[k]; });
+  if (typeof diagnostics !== 'undefined') { diagnostics.bumps = 0; diagnostics.flush = 0; diagnostics.warnings.length = 0; }
   failVerifyFor = null;
 }
 
@@ -135,7 +137,7 @@ const diagnostics = { bumps: 0, flush: 0, warnings: [] };
 function buildArchive() {
   const factory = new Function(
     'ARCHIVE_SHEET_SPECS', 'PROP_LAST_ARCHIVE_RUN', 'Logger', 'SpreadsheetApp',
-    'getConfigMap', 'getSheet', 'getSpreadsheet', 'readScriptProperty_', 'writeScriptProperty_',
+    'getConfigMap', 'getConfigMapReadOnly_', 'getSheet', 'getExistingSheet_', 'getSpreadsheet', 'readScriptProperty_', 'writeScriptProperty_',
     'toDateStr', 'appTodayStr', 'bumpDashVersion_', 'withLock', 'ensureArchiveSheet_', 'getArchiveTarget_',
     `
     ${extractFunction(CODE_GS, 'monthsAgoFrom_')}
@@ -151,7 +153,9 @@ function buildArchive() {
     { log: m => diagnostics.warnings.push(String(m)) },
     { flush: () => { diagnostics.flush++; } },
     () => ({ ARCHIVE_AMBANG_BULAN: 6, ARCHIVE_AKTIF: 0 }),
+    () => ({ ARCHIVE_AMBANG_BULAN: 6, ARCHIVE_AKTIF: 0 }),
     getSheetStub,
+    n => (SHEETS[n] || null),
     () => ({ getSheetByName: n => (SHEETS[n] || null), insertSheet: n => { ROWS[n] = []; SHEETS[n] = makeSheet(n, ROWS[n]); return SHEETS[n]; } }),
     k => PROP[k] || null,
     (k, v) => { PROP[k] = v; },
@@ -185,6 +189,7 @@ resetRows();
   check('tanpa argumen dijalankan sebagai uji kering', rep.dryRun === true);
   check('tidak ada satu sel pun berubah saat uji kering', before === after);
   check('tidak ada sheet Arsip_* yang dibuat', !ROWS.Arsip_Murojaah && !ROWS.Arsip_Riwayat_Tes && !ROWS.Arsip_Notifikasi);
+  check('uji kering tidak menulis Script Property', Object.keys(PROP).length === 0, JSON.stringify(PROP));
   check('cutoff dilaporkan (6 bulan sebelum 2026-10-01)', rep.cutoff === '2026-04-01', rep.cutoff);
   check('menemukan 2 baris Murojaah lama', rep.sheets.Murojaah.ditemukan === 2, JSON.stringify(rep.sheets.Murojaah));
   check('menemukan 1 baris Riwayat_Tes lama', rep.sheets.Riwayat_Tes.ditemukan === 1, JSON.stringify(rep.sheets.Riwayat_Tes));
@@ -258,6 +263,18 @@ resetRows();
   check('sheet yang hilang dilewati dengan catatan', rep.sheets.Riwayat_Tes && rep.sheets.Riwayat_Tes.catatan === 'sheet tidak ditemukan', JSON.stringify(rep.sheets.Riwayat_Tes));
   check('sheet lain tetap diproses', rep.sheets.Murojaah.dihapus === 2);
   check('ada peringatan "tidak ditemukan"', rep.warnings.some(w => w.indexOf('tidak ditemukan') !== -1));
+}
+
+console.log('\nArsip — uji kering tidak membuat sheet sumber yang hilang:');
+resetRows();
+{
+  delete ROWS.Riwayat_Tes; delete SHEETS.Riwayat_Tes;
+  const A = buildArchive();
+  const rep = A.archiveOldRows({ dryRun: true });
+  check('dry-run tetap menghasilkan laporan sukses', rep.success === true);
+  check('sheet sumber yang hilang tetap tidak dibuat', !ROWS.Riwayat_Tes && !SHEETS.Riwayat_Tes);
+  check('sheet lain tetap diaudit', rep.sheets.Murojaah && rep.sheets.Murojaah.ditemukan === 2);
+  check('dry-run tanpa sheet tetap tidak menulis property', Object.keys(PROP).length === 0);
 }
 
 console.log(`\n${pass} lulus, ${fail} gagal.`);

@@ -7,7 +7,7 @@
     "start": "node tools/serve.cjs",
     "serve": "node tools/serve.cjs",
     "check": "node tools/check-syntax.cjs && node tools/check-backend.cjs && node tools/check-api-parity.cjs",
-    "test": "node tools/test-api.cjs && node tools/test-retention.cjs && node tools/test-archive.cjs",
+    "test": "node tools/test-api.cjs && node tools/test-retention.cjs && node tools/test-archive.cjs && node tools/test-schema-audit.cjs",
     "verify": "npm run check && npm test"
   },
   "engines": {

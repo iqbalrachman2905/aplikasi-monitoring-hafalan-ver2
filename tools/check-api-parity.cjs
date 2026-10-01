@@ -177,6 +177,15 @@ const archiveRun = functionBody(CODE_GS, 'archiveOldRowsRun_') || '';
 if (!archiveRun) {
   errors.push('archiveOldRowsRun_ tidak ditemukan.');
 } else {
+  if (!/dryRun\s*\?\s*getConfigMapReadOnly_\(\)\s*:\s*getConfigMap\(\)/.test(archiveRun)) {
+    errors.push('uji kering arsip harus membaca Config tanpa membuat sheet atau mengubah cache global.');
+  }
+  if (!/dryRun\s*\?\s*getExistingSheet_\(spec\.name\)\s*:\s*getSheet\(spec\.name\)/.test(archiveRun)) {
+    errors.push('uji kering arsip tidak boleh membuat sheet sumber yang hilang.');
+  }
+  if (!/if\s*\(!dryRun\)\s*\{\s*writeScriptProperty_/.test(archiveRun)) {
+    errors.push('uji kering arsip tidak boleh menulis Script Property.');
+  }
   if (!/sesudah - sebelum !== values\.length/.test(archiveRun)) {
     errors.push('arsip tidak memverifikasi jumlah baris arsip sebelum menghapus — risiko data hilang permanen.');
   }
@@ -205,12 +214,22 @@ if (!/ARCHIVE_AKTIF/.test(CODE_GS)) {
   errors.push('Config ARCHIVE_AKTIF tidak ada — arsip otomatis tidak bisa dikendalikan dengan aman.');
 }
 
-// selfTest wajib ada dan read-only (tidak boleh menulis/menghapus)
+// selfTest/diagnostik wajib read-only, termasuk fungsi helper yang dipanggil.
 const selfTestBody = functionBody(CODE_GS, 'selfTest');
 if (!selfTestBody) {
   errors.push('selfTest() tidak ditemukan — pemilik sistem tidak punya cara memeriksa kesehatan data.');
-} else if (/deleteRow|setValue|appendRow/.test(selfTestBody)) {
+} else if (/deleteRow|setValue|appendRow|clear\s*\(/.test(selfTestBody)) {
   errors.push('selfTest() tidak boleh menulis/menghapus data — harus murni diagnostik.');
+}
+const diagnosticsBody = functionBody(CODE_GS, 'systemDiagnostics_') || '';
+if (!diagnosticsBody) {
+  errors.push('systemDiagnostics_() tidak ditemukan.');
+} else if (/\bgetSheet\s*\(|\breadSheet_\s*\(|\bgetConfigMap\s*\(/.test(diagnosticsBody)) {
+  errors.push('systemDiagnostics_() memakai helper yang dapat membuat sheet; gunakan helper baca-saja.');
+}
+const schemaAuditBody = functionBody(CODE_GS, 'auditDatabaseSchema') || '';
+if (!schemaAuditBody || /insertSheet|setValues|appendRow|deleteRows|\.clear\s*\(/.test(schemaAuditBody)) {
+  errors.push('auditDatabaseSchema() wajib tersedia dan murni baca-saja.');
 }
 if (!/selfTest|systemDiagnostics_/.test(CODE_GS)) {
   errors.push('diagnostik sistem tidak ditemukan.');
