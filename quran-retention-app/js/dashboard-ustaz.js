@@ -35,6 +35,114 @@ const DashboardUstaz = {
     return Number(val) || 0;
   },
 
+  /** Ringkasan setoran terakhir dan tindak lanjut yang paling perlu dilihat. */
+  buildGroupGuidance() {
+    const list = (this.data && this.data.santriList) || [];
+    const recentSetoran = list
+      .filter(s => s.lastSetoran && s.lastSetoran.tgl)
+      .sort((a, b) => String(b.lastSetoran.tgl).localeCompare(String(a.lastSetoran.tgl)))[0] || null;
+
+    const needsAttention = list.filter(s => {
+      const ret = s.retention || {};
+      return Number(ret.merah) > 0 || Number(ret.kuning) > 0 || Number(ret.overdue) > 0 || (s.flags || []).length > 0;
+    }).sort((a, b) => {
+      const ar = a.retention || {}, br = b.retention || {};
+      return ((Number(br.merah) || 0) - (Number(ar.merah) || 0))
+        || ((Number(br.overdue) || 0) - (Number(ar.overdue) || 0))
+        || ((Number(br.kuning) || 0) - (Number(ar.kuning) || 0));
+    });
+
+    let next;
+    if (needsAttention.length) {
+      const student = needsAttention[0];
+      const ret = student.retention || {};
+      const detail = (student.flags || []).length
+        ? student.flags.join(' • ')
+        : `${Number(ret.merah) || 0} Merah • ${Number(ret.kuning) || 0} Kuning • ${Number(ret.overdue) || 0} review terlambat`;
+      next = {
+        action: 'feedback', student,
+        title: `Tinjau kondisi ${student.nama}`,
+        detail,
+        button: 'Beri arahan'
+      };
+    } else {
+      const missingTarget = list.find(s => !s.target);
+      if (missingTarget) {
+        next = {
+          action: 'target', student: missingTarget,
+          title: `Atur target untuk ${missingTarget.nama}`,
+          detail: 'Target bulanan membantu santri memahami hafalan berikutnya yang perlu dicapai.',
+          button: 'Atur target'
+        };
+      } else if (list.length) {
+        next = {
+          action: 'setoran', student: list[0],
+          title: 'Belum ada tindak lanjut mendesak',
+          detail: 'Retensi dan target kelompok terpantau. Lanjutkan pencatatan setoran saat santri siap.',
+          button: 'Catat setoran'
+        };
+      } else {
+        next = {
+          action: '', student: null,
+          title: 'Belum ada santri dalam kelompok',
+          detail: 'Pastikan daftar dan relasi kelompok sudah disiapkan sebelum mencatat setoran.',
+          button: 'Belum tersedia'
+        };
+      }
+    }
+
+    return {
+      recent: recentSetoran ? {
+        title: `${recentSetoran.nama} • ${recentSetoran.lastSetoran.surah}`,
+        detail: `Ayat ${Number(recentSetoran.lastSetoran.ayatMulai) || 0}-${Number(recentSetoran.lastSetoran.ayatAkhir) || 0}`,
+        meta: [recentSetoran.lastSetoran.tgl, recentSetoran.lastSetoran.nilai ? `Nilai ${recentSetoran.lastSetoran.nilai}` : ''].filter(Boolean).join(' • ')
+      } : {
+        title: 'Belum ada setoran tercatat',
+        detail: 'Riwayat setoran terbaru akan tampil di sini setelah Ustaz menyimpan setoran.',
+        meta: ''
+      },
+      next
+    };
+  },
+
+  formatActivityDate(value) {
+    const raw = String(value || '');
+    const match = raw.match(/^(\d{4}-\d{2}-\d{2})/);
+    if (!match) return raw;
+    const date = new Date(`${match[1]}T12:00:00`);
+    if (isNaN(date.getTime())) return match[1];
+    return new Intl.DateTimeFormat('id-ID', { day: 'numeric', month: 'short', year: 'numeric' }).format(date);
+  },
+
+  renderDashboardGuidance() {
+    const guidance = this.buildGroupGuidance();
+    const titleEl = document.getElementById('ustaz-last-action-title');
+    const detailEl = document.getElementById('ustaz-last-action-detail');
+    const metaEl = document.getElementById('ustaz-last-action-meta');
+    const nextTitleEl = document.getElementById('ustaz-next-action-title');
+    const nextDetailEl = document.getElementById('ustaz-next-action-detail');
+    const button = document.getElementById('ustaz-next-action-button');
+
+    if (titleEl) titleEl.textContent = guidance.recent.title;
+    if (detailEl) detailEl.textContent = guidance.recent.detail;
+    if (metaEl) metaEl.textContent = guidance.recent.meta
+      ? guidance.recent.meta.split(' • ').map(part => this.formatActivityDate(part)).join(' • ')
+      : '';
+    if (nextTitleEl) nextTitleEl.textContent = guidance.next.title;
+    if (nextDetailEl) nextDetailEl.textContent = guidance.next.detail;
+    if (button) {
+      button.textContent = guidance.next.button;
+      button.disabled = !guidance.next.action;
+      button.onclick = () => {
+        const student = guidance.next.student;
+        if (!student) return;
+        if (guidance.next.action === 'feedback') this.openFeedbackModal(student.idSantri, student.nama);
+        else if (guidance.next.action === 'target') this.openTargetModalFor(student.idSantri);
+        else if (guidance.next.action === 'setoran') this.openSetoranModalFor(student.idSantri);
+      };
+    }
+  },
+
   /**
    * Delegasi klik untuk tombol aksi di matriks & banner auto-flag
    * (menggantikan inline onclick yang rentan bocor string/XSS).
@@ -76,6 +184,9 @@ const DashboardUstaz = {
     document.getElementById('ustaz-stat-hijau').textContent = st.totalHijau;
     document.getElementById('ustaz-stat-kuning').textContent = st.totalKuning;
     document.getElementById('ustaz-stat-merah').textContent = st.totalMerah;
+
+    // 2b. Aktivitas terakhir dan tindakan yang paling perlu dilakukan.
+    this.renderDashboardGuidance();
 
     // 3. Auto-Flag Alert Banner
     this.renderAutoFlags();
@@ -255,7 +366,7 @@ const DashboardUstaz = {
 
     const list = this.data.santriList || [];
     if (list.length === 0) {
-      container.innerHTML = `<tr><td colspan="5" style="text-align: center; padding: 2rem; color: var(--text-muted);">Belum ada santri terdaftar.</td></tr>`;
+      container.innerHTML = `<tr class="ustaz-matrix-empty"><td colspan="4" style="text-align: center; padding: 2rem; color: var(--text-muted);">Belum ada santri terdaftar.</td></tr>`;
       return;
     }
 
@@ -265,34 +376,36 @@ const DashboardUstaz = {
       const targetText = s.target
         ? `${UI.escapeHTML(s.target.surah)} (${Number(s.target.ayatMulai) || 0}-${Number(s.target.ayatAkhir) || 0})`
         : '<em style="color:var(--gold-600)">Belum diatur</em>';
-      const lastText = s.lastUnit
-        ? `${UI.escapeHTML(s.lastUnit.surah)} s.d. ayat ${Number(s.lastUnit.ayatAkhir) || 0}`
-        : '<em style="color:var(--text-muted)">Belum ada setoran</em>';
+      const lastSetoran = s.lastSetoran || null;
+      const lastUnit = s.lastUnit || null;
+      const lastText = lastSetoran
+        ? `${UI.escapeHTML(lastSetoran.surah)} ayat ${Number(lastSetoran.ayatMulai) || 0}-${Number(lastSetoran.ayatAkhir) || 0}${lastSetoran.nilai ? ` • nilai ${UI.escapeHTML(lastSetoran.nilai)}` : ''}`
+        : (lastUnit
+          ? `${UI.escapeHTML(lastUnit.surah)} s.d. ayat ${Number(lastUnit.ayatAkhir) || 0}`
+          : '<em style="color:var(--text-muted)">Belum ada setoran</em>');
+      const lastDate = lastSetoran && lastSetoran.tgl ? lastSetoran.tgl : (lastUnit && lastUnit.tglMulai ? lastUnit.tglMulai : '');
 
       return `
-        <tr style="border-bottom: 1px solid var(--border-light);">
-          <td style="padding: 1rem 0.75rem;">
+        <tr class="ustaz-matrix-row">
+          <td data-label="Santri & rencana" style="padding: 1rem 0.75rem;">
             <div style="font-weight: 700; color: var(--text-main);">${UI.escapeHTML(s.nama)}</div>
-            <div style="font-size: 0.75rem; color: var(--text-muted);">
-              Target: ${targetText}
-            </div>
-            <div style="font-size: 0.72rem; color: var(--text-muted);">
-              🕮 Terakhir: ${lastText}
+            <div class="matrix-meta">Target: ${targetText}</div>
+            <div class="matrix-meta">Terakhir setor: ${lastText}</div>
+            ${lastDate ? `<div class="matrix-meta">Tanggal: ${UI.escapeHTML(this.formatActivityDate(lastDate))}</div>` : ''}
+          </td>
+          <td data-label="Status retensi" style="padding: 1rem 0.75rem;">
+            <div class="ustaz-retention-summary">
+              <span class="status-pill status-green" title="Hijau: ${Number(ret.hijau) || 0} unit" aria-label="Hijau: ${Number(ret.hijau) || 0} unit">🟢 ${Number(ret.hijau) || 0}</span>
+              <span class="status-pill status-yellow" title="Kuning: ${Number(ret.kuning) || 0} unit" aria-label="Kuning: ${Number(ret.kuning) || 0} unit">🟡 ${Number(ret.kuning) || 0}</span>
+              <span class="status-pill status-red" title="Merah: ${Number(ret.merah) || 0} unit" aria-label="Merah: ${Number(ret.merah) || 0} unit">🔴 ${Number(ret.merah) || 0}</span>
             </div>
           </td>
-          <td style="padding: 1rem 0.75rem;">
-            <div style="display: flex; gap: 0.35rem;">
-              <span class="status-pill status-green" style="padding: 0.15rem 0.45rem;">${Number(ret.hijau) || 0}</span>
-              <span class="status-pill status-yellow" style="padding: 0.15rem 0.45rem;">${Number(ret.kuning) || 0}</span>
-              <span class="status-pill status-red" style="padding: 0.15rem 0.45rem;">${Number(ret.merah) || 0}</span>
-            </div>
-          </td>
-          <td style="padding: 1rem 0.75rem;">
+          <td data-label="Konsistensi" style="padding: 1rem 0.75rem;">
             <div style="font-weight: 600; font-size: 0.85rem; color: var(--gold-700);">🔥 ${this.streakOf(gamif)} Hari</div>
             <div style="font-size: 0.75rem; color: var(--text-muted);">${Number(gamif.xp) || 0} XP (Lv ${Number(gamif.level) || 1})</div>
           </td>
-          <td style="padding: 1rem 0.75rem; text-align: right;">
-            <div style="display: flex; justify-content: flex-end; gap: 0.4rem;">
+          <td data-label="Tindakan" style="padding: 1rem 0.75rem; text-align: right;">
+            <div class="matrix-actions" style="display: flex; justify-content: flex-end; gap: 0.4rem;">
               <button class="btn btn-primary btn-sm" type="button"
                 data-ustaz-action="setoran"
                 data-id-santri="${UI.escapeHTML(s.idSantri)}">

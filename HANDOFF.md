@@ -1,8 +1,8 @@
 # 🤝 HANDOFF — Status Pekerjaan & Cara Melanjutkan
 
 > Dokumen ini untuk **dibaca pertama kali** saat melanjutkan pekerjaan di sesi/chat baru.
-> Terakhir diperbarui: **1 Oktober 2026** • Versi aplikasi: **4.4.0** • Branch kerja:
-> `arena/01a0f19f-aplikasi-monitoring-hafalan-ve` • PR: **#2** (ke `main`).
+> Terakhir diperbarui: **2 Oktober 2026** • Versi aplikasi: **4.5.0** • Branch kerja:
+> `arena/01a0f627-aplikasi-monitoring-hafalan-ve`. Status PR perlu diverifikasi dari branch ini sebelum review/merge.
 
 ---
 
@@ -14,17 +14,20 @@ melewati dua gelombang perbaikan:
 | Gelombang | Fokus | Status |
 |---|---|---|
 | **v4.3 (Gelombang 0)** | Memutus **kegagalan senyap** & **data dobel**: feedback ustaz yang hilang, celah otorisasi antar-kelompok, idempotensi `requestId`, taksonomi kode error, timeout per aksi, guard klik ganda, trigger malam otomatis, `backend/` tidak lagi terbit ke Pages, CI memverifikasi sebelum deploy | ✅ selesai |
-| **v4.4 (Gelombang 1 tahap 1–2)** | **Performa & perawatan data**: indeks sekali baca (O(santri×baris) → O(baris)), kolom minimal (`getDataRange` 34 → 3), sesi & dashboard via `CacheService`, arsip otomatis yang aman (default uji kering), `selfTest()`, uji retensi + paritas Mode Demo | ✅ selesai |
+| **v4.4 (Gelombang 1 tahap 1–2)** | **Performa & perawatan data**: indeks sekali baca, kolom minimal, sesi & dashboard via `CacheService`, arsip aman (default uji kering), audit skema/relasi ID baca-saja, uji retensi + paritas Demo | ✅ selesai |
+| **v4.5 (Audit PRD & UX mobile)** | Kartu aktivitas terakhir + langkah berikutnya per role, ringkasan 7 hari dan tren bulanan Orang Tua, setoran terakhir Ustaz, matriks kartu di mobile, zoom browser & target sentuh aksesibel | ✅ selesai secara lokal |
 | **Berikutnya (tahap 3)** | Jalur ayat & flashcard: `get_ayah_range` (1 fetch banyak ayat), penyusunan kartu paralel, cache ayat di klien; lalu idempotensi tingkat bisnis & rate limit login | ⏳ belum |
 
-**Semua uji hijau:** `npm run verify` → 47 uji otomatis (24 lapisan API + 23 retensi/arsip) + cek sintaks + penjaga paritas.
+**Uji terakhir:** `npm run verify` lulus — 151 pemeriksaan otomatis (API 28, retensi 28, arsip 38, skema 36, dashboard/UX 21); sintaks, pemeriksaan backend GAS, dan paritas juga lulus. `git diff --check` juga lulus. Belum ada uji browser/perangkat atau deployment GAS.
+
+**Catatan cakupan PRD:** ringkasan mingguan kini berupa panel dashboard Ortu dari catatan setoran/murojaah/evaluasi yang tersimpan. Auto-Flag penurunan performa Ustaz masih gap; definisi perbandingan belum disepakati, dan evaluasi acak lintas unit tidak boleh dibandingkan begitu saja.
 
 ---
 
 ## 2. Perintah wajib sebelum menyentuh kode
 
 ```bash
-npm run verify   # WAJIB hijau sebelum commit: sintaks + paritas + 47 uji
+npm run verify   # WAJIB hijau sebelum commit: sintaks + paritas + 151 pemeriksaan otomatis
 npm start        # dev server: http://localhost:8080 (bind 0.0.0.0)
 ```
 
@@ -37,14 +40,17 @@ Mode Live butuh deployment Apps Script (lihat `backend/SetupGuide.md`).
 
 | Berkas | Isi yang perlu diketahui |
 |---|---|
-| `quran-retention-app/backend/Code.gs` | Backend GAS (~2.900 baris). Kunci: `doPost` (router + idempotensi), `withLock`, `withIdempotency`, `readSheet_`, `buildMasterIndex_`, `dashVersion_`, `calculateNextRetentionState`, `archiveOldRows`, `systemDiagnostics_`, `selfTest`, `healthCheck` |
+| `quran-retention-app/backend/Code.gs` | Backend GAS (~3.700 baris). Kunci: `doPost` (router + idempotensi), `withLock`, `withIdempotency`, `readSheet_`, `buildMasterIndex_`, aktivitas terakhir + ringkasan 7 hari Orang Tua, `dashVersion_`, `calculateNextRetentionState`, `archiveOldRows`, audit skema/ID baca-saja, `selfTest`, `healthCheck` |
 | `quran-retention-app/js/api.js` | Klien HTTP: `API.ERR` (taksonomi kode error), `API_POLICY` (timeout), `requestId`, retry aman, `handleMockRequest` (Mode Demo) |
 | `quran-retention-app/js/mock-data.js` | State Mode Demo + `mockApplyRetention` (harus identik dengan `calculateNextRetentionState`) |
 | `quran-retention-app/js/config.js` | `APP_VERSION` + `API_POLICY` + `RETENTION`/`GAMIFICATION`/`COMPETENCY` (cermin sheet `Config`) |
 | `quran-retention-app/js/ui.js` | `UI.runOnce()` — pengaman klik ganda untuk semua aksi tulis |
 | `tools/check-api-parity.cjs` | 8 kelompok penjaga regresi: action mock↔backend, feedback→Notifikasi, mock default, `setup_database`, idempotensi, performa dashboard, keselamatan arsip, `selfTest` read-only |
-| `tools/test-api.cjs` | 24 uji lapisan API (mock, taksonomi error, anti-data-dobel, peringatan versi) |
-| `tools/test-retention.cjs` | 23 uji retensi + **paritas backend↔mock** + perhitungan tanggal arsip |
+| `tools/test-api.cjs` | 28 uji lapisan API (mock, kontrak dashboard termasuk ringkasan pekanan, taksonomi error, anti-data-dobel) |
+| `tools/test-retention.cjs` | 28 uji retensi + **paritas backend↔mock** + perhitungan tanggal arsip |
+| `tools/test-dashboard-guidance.cjs` | 21 uji kontrak aktivitas/aksi per role, ringkasan pekanan/tren bulanan, & penjaga UX mobile |
+| `tools/test-archive.cjs` | 38 uji keselamatan arsip dry-run, verifikasi tulis, cutoff, dan idempotensi |
+| `tools/test-schema-audit.cjs` | 36 uji audit skema/relasi ID dan repair header aditif tanpa migrasi |
 
 ---
 
@@ -64,10 +70,9 @@ Mode Live butuh deployment Apps Script (lihat `backend/SetupGuide.md`).
 ## 5. Checklist SEBELUM merge (aman & cepat)
 
 - [ ] `npm run verify` hijau di mesin sendiri.
-- [ ] Jadikan PR #2 sebagai **draft** hanya bila masih ada perubahan; kalau tidak, biarkan siap merge.
+- [ ] Verifikasi melalui `gh pr list` apakah ada PR yang benar-benar berasal dari branch sesi ini; jangan menganggap PR #2 terkait branch ini tanpa pemeriksaan.
 - [ ] Tab **Actions** di GitHub: job `verify` (check + test) harus **sukses** sebelum job `deploy`.
-- [ ] Baca ringkasan perubahan: 15 file + 3 berkas uji baru; **tidak ada perubahan skema sheet**,
-      **tidak ada migrasi data** yang wajib (arsip hanya membuat sheet `Arsip_*` saat dijalankan).
+- [ ] Baca `git diff --stat`; audit ini hanya menambah kontrak baca dashboard dan UX lokal. Tidak ada workbook live yang diubah, tidak ada migrasi ID, dan tidak ada kebijakan target bulanan yang diubah.
 - [ ] (Opsional, sangat disarankan) **Buat salinan spreadsheet** sebelum uji Live:
       Google Sheets ➔ *File* ➔ *Make a copy*.
 
@@ -76,7 +81,7 @@ Mode Live butuh deployment Apps Script (lihat `backend/SetupGuide.md`).
 1. **Salin `backend/Code.gs`** ke editor Apps Script (Extensions ➔ Apps Script).
 2. **Deploy versi baru:** Deploy ➔ *Manage deployments* ➔ ✏️ Edit ➔ *Version: New version* ➔ Deploy.
    Tanpa ini aplikasi menampilkan peringatan *"backend masih versi lama"* (memang disengaja).
-3. Di editor Apps Script, jalankan **`selfTest()`** → periksa `warnings` di log Executions.
+3. Jalankan `selfTest()` hanya pada spreadsheet salinan/dev setelah seluruh efek sampingnya ditinjau; jangan menjalankannya pada workbook live berisi data sampai aman read-only terbukti.
 4. Uji Mode Live: login `ustaz1` → buka dashboard (pastikan cepat) → catat 1 setoran →
    cek santri menerima notifikasi; login `ortu1` → tes acak → evaluasi.
 5. Cek halaman Pages: `.../backend/Code.gs` harus **404** (bukti folder backend tidak terbit).

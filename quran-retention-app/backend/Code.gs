@@ -15,7 +15,7 @@
 
 // Versi backend. WAJIB dinaikkan bersamaan dengan APP_VERSION di js/config.js
 // agar frontend bisa mendeteksi "backend tertinggal" (deployment versi lama).
-const APP_VERSION = '4.4.0';
+const APP_VERSION = '4.5.0';
 
 // ID Spreadsheet default. TIDAK perlu diedit lagi di kode: nilai ini hanya
 // dipakai bila Script Property 'SPREADSHEET_ID' belum diisi.
@@ -57,6 +57,29 @@ const SERVER_CAPABILITIES = {
   lazySessionCleanup: true,
   selfInstallTrigger: true
 };
+
+/**
+ * Skema sheet inti: dipakai oleh audit baca-saja dan repair header aditif.
+ * Audit dapat membaca sel data hanya untuk menghitung baris yang sepenuhnya
+ * kosong; nilainya tidak pernah dimasukkan ke laporan. Urutan header ini harus
+ * sesuai dengan fungsi yang membaca data berdasarkan indeks kolom.
+ */
+const DATABASE_SHEET_SCHEMA = [
+  { name: 'Config', headers: ['Key', 'Value', 'Description'], phase: 'Mesin internal', purpose: 'Parameter retention, gamifikasi, sesi, dan arsip. Header-only berarti aplikasi memakai nilai default dari backend.' },
+  { name: 'Users', headers: ['ID', 'Username', 'Password_Hash', 'Role', 'Nama', 'ID_Terkait'], phase: 'Fondasi role', purpose: 'Akun dan relasi peran Ustaz, Santri, serta Orang Tua. Tanpa baris pengguna, tidak ada akun live yang dapat login.' },
+  { name: 'Santri', headers: ['ID_Santri', 'Nama', 'ID_Ustaz', 'Status'], phase: 'HAFAL / monitoring', purpose: 'Daftar santri dan relasi bimbingan ke Ustaz.' },
+  { name: 'Target', headers: ['ID_Target', 'Bulan', 'ID_Santri', 'Target_Surah', 'Ayat_Mulai', 'Ayat_Akhir'], phase: 'LANJUT', purpose: 'Rencana hafalan bulanan yang ditetapkan Ustaz sebagai tindak lanjut/tujuan berikutnya.' },
+  { name: 'Master_Hafalan', headers: ['ID_Master', 'ID_Santri', 'Surah', 'Ayat_Mulai', 'Ayat_Akhir', 'Tgl_Mulai', 'Status', 'Retention_Status_Cache', 'Next_Review_Cache', 'Current_Interval_Hari', 'Consecutive_Lupa', 'Consecutive_Lancar'], phase: 'HAFAL → JAGA → PUTUSKAN → LANJUT', purpose: 'Unit hafalan dan state retensi/jadwal review untuk memutuskan apakah unit dijaga, diuji ulang, atau siap dilanjutkan; histori tes tetap tersimpan di Riwayat_Tes.' },
+  { name: 'Hafalan', headers: ['ID_Hafalan', 'Tgl', 'ID_Santri', 'Surah', 'Ayat_Mulai', 'Ayat_Akhir', 'Nilai', 'Catatan', 'ID_Target', 'Timestamp'], phase: 'HAFAL', purpose: 'Fakta dan histori setoran, nilai, serta catatan Ustaz.' },
+  { name: 'Murojaah', headers: ['ID_Murojaah', 'Tgl', 'ID_Santri', 'Jenis_Misi', 'Detail', 'Pelapor', 'Timestamp'], phase: 'JAGA', purpose: 'Log aktivitas murojaah harian; saat ini header tidak menyediakan kolom kualitas hasil.' },
+  { name: 'Riwayat_Tes', headers: ['ID_Tes', 'Tgl', 'ID_Santri', 'ID_Master', 'Surah', 'Ayat_Mulai', 'Ayat_Akhir', 'Kualitas', 'Pelapor'], phase: 'UJI → PUTUSKAN', purpose: 'Histori hasil tes hafalan, termasuk tes Orang Tua; hasil terbaru memicu pembaruan state di Master_Hafalan.' },
+  { name: 'Gamifikasi', headers: ['ID_Santri', 'XP_Total', 'Level', 'Streak_Saat_Ini', 'Streak_Terpanjang', 'Last_Qualifying_Date'], phase: 'Pendukung JAGA', purpose: 'Ringkasan XP, level, dan konsistensi; bukan sumber ukuran kualitas retensi.' },
+  { name: 'Badge', headers: ['ID_Badge', 'ID_Santri', 'Nama_Badge', 'Tgl_Diperoleh'], phase: 'Pendukung perjalanan', purpose: 'Riwayat lencana yang didapat santri.' },
+  { name: 'Notifikasi', headers: ['ID_Notif', 'ID_User', 'Tipe', 'Pesan', 'Tgl_Kirim', 'Status_Baca'], phase: 'Komunikasi lintas tahap', purpose: 'Pesan, feedback, apresiasi, dan pemberitahuan hasil tes.' },
+  { name: 'Feedback', headers: ['ID_Feedback', 'ID_Santri', 'ID_Hafalan', 'ID_Ustaz', 'Pesan', 'Tgl', 'Status_Baca'], phase: 'Bimbingan Ustaz', purpose: 'Arsip feedback pedagogis Ustaz yang terkait dengan santri/setoran.' },
+  { name: 'Sessions', headers: ['Token', 'ID_User', 'Role', 'Expiry', 'ID_Terkait', 'Nama'], phase: 'Fondasi akses', purpose: 'Sesi login aktif; kosong dapat normal setelah logout atau pembersihan sesi.' },
+  { name: 'Cache_Ayat', headers: ['Surah', 'Ayat', 'Teks_Arab', 'Audio_URL', 'Last_Fetched', 'Teks_Indonesia'], phase: 'Pendukung UJI/latihan', purpose: 'Cache teks, audio, dan terjemahan ayat dari provider eksternal; data cache dapat diisi ulang.' }
+];
 
 /** Baca Script Property dengan aman (PropertiesService bisa gagal di beberapa konteks). */
 function readScriptProperty_(key) {
@@ -429,6 +452,619 @@ function getSheet(sheetName) {
   return sheet;
 }
 
+/** Cari sheet yang sudah ada tanpa membuat tab bila namanya tidak ditemukan. */
+function getExistingSheet_(sheetName) {
+  const ss = getSpreadsheet();
+  return ss ? ss.getSheetByName(sheetName) : null;
+}
+
+/** Membaca baris data hanya dari sheet yang sudah ada; benar-benar read-only. */
+function readExistingSheet_(sheetName, numColumns) {
+  const sheet = getExistingSheet_(sheetName);
+  if (!sheet) return [];
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return [];
+  return sheet.getRange(2, 1, lastRow - 1, numColumns).getValues();
+}
+
+/** Hitung baris data yang sepenuhnya kosong tanpa mengembalikan nilai sel. */
+function countBlankDataRows_(sheet, lastRow, width) {
+  const result = { count: 0, rowNumbers: [], truncated: false };
+  const chunkSize = 1000;
+  const maxRowNumbers = 100;
+  for (let startRow = 2; startRow <= lastRow; startRow += chunkSize) {
+    const numRows = Math.min(chunkSize, lastRow - startRow + 1);
+    const rows = sheet.getRange(startRow, 1, numRows, width).getValues();
+    for (let r = 0; r < rows.length; r++) {
+      let hasValue = false;
+      for (let c = 0; c < rows[r].length; c++) {
+        const value = rows[r][c];
+        if (value !== null && value !== undefined && String(value).trim() !== '') {
+          hasValue = true;
+          break;
+        }
+      }
+      if (!hasValue) {
+        result.count++;
+        if (result.rowNumbers.length < maxRowNumbers) result.rowNumbers.push(startRow + r);
+        else result.truncated = true;
+      }
+    }
+  }
+  return result;
+}
+
+/**
+ * Cari header skema yang mungkin bergeser ke bawah (contohnya baris kosong
+ * sebelum header). Hasil ini hanya diagnostik; repair otomatis tidak pernah
+ * memindahkan baris.
+ */
+function findSchemaHeaderRowOffset_(sheet, spec, lastRow, readWidth) {
+  const scanEnd = Math.min(lastRow, 20);
+  if (scanEnd < 2) return 0;
+  const rows = sheet.getRange(2, 1, scanEnd - 1, readWidth).getValues();
+  const requiredPrefix = Math.min(3, spec.headers.length);
+
+  for (let r = 0; r < rows.length; r++) {
+    const row = rows[r];
+    let prefixLength = 0;
+    while (prefixLength < spec.headers.length &&
+        prefixLength < readWidth &&
+        String(row[prefixLength] || '').trim() === spec.headers[prefixLength]) {
+      prefixLength++;
+    }
+    if (prefixLength < requiredPrefix) continue;
+
+    let hasUnexpectedValue = false;
+    for (let c = prefixLength; c < row.length; c++) {
+      if (String(row[c] || '').trim() !== '') {
+        hasUnexpectedValue = true;
+        break;
+      }
+    }
+    if (!hasUnexpectedValue) return r + 2;
+  }
+  return 0;
+}
+
+/**
+ * Inspect sheet/header and row counts. Optional blank-row scan returns only
+ * counts and row numbers; record values never leave the in-memory audit.
+ * Kolom tambahan yang tidak dikenal tidak pernah ditimpa otomatis.
+ */
+function inspectDatabaseSheet_(spec, sheet, scanBlankRows) {
+  if (!sheet) {
+    return {
+      name: spec.name,
+      phase: spec.phase,
+      purpose: spec.purpose,
+      status: 'missing_sheet',
+      lastRow: 0,
+      headerRowDetected: 0,
+      dataRowsAssumingHeader: 0,
+      blankDataRows: scanBlankRows ? 0 : null,
+      blankDataRowNumbers: scanBlankRows ? [] : null,
+      blankDataRowNumbersTruncated: scanBlankRows ? false : null,
+      foundHeaders: [],
+      missingHeaders: spec.headers.slice(),
+      headerPrefixLength: 0,
+      repairable: true
+    };
+  }
+
+  const lastRow = Math.max(0, Number(sheet.getLastRow()) || 0);
+  const maxColumns = Math.max(1, Number(sheet.getMaxColumns ? sheet.getMaxColumns() : spec.headers.length) || 1);
+  const lastColumn = Math.max(0, Number(sheet.getLastColumn()) || 0);
+  const readWidth = Math.min(maxColumns, Math.max(spec.headers.length, lastColumn));
+  const rawHeaders = lastRow > 0
+    ? sheet.getRange(1, 1, 1, readWidth).getValues()[0]
+    : [];
+  const foundHeaders = [];
+  for (let i = 0; i < readWidth; i++) foundHeaders.push(String(rawHeaders[i] || '').trim());
+
+  let prefixLength = 0;
+  while (prefixLength < spec.headers.length &&
+      prefixLength < foundHeaders.length &&
+      foundHeaders[prefixLength] === spec.headers[prefixLength]) {
+    prefixLength++;
+  }
+  const hasAnyHeader = foundHeaders.some(function (value) { return value !== ''; });
+  const hasUnexpectedHeaders = foundHeaders.slice(spec.headers.length).some(function (value) { return value !== ''; });
+  const missingHeaders = spec.headers.slice(prefixLength);
+  const shiftedHeaderRow = prefixLength < spec.headers.length
+    ? findSchemaHeaderRowOffset_(sheet, spec, lastRow, readWidth)
+    : 0;
+  let status;
+  let repairable = false;
+
+  if (shiftedHeaderRow > 1) {
+    // Jangan menulis baris 1 di atas header yang sudah ada di bawahnya.
+    // Perlu peninjauan manual sebelum memindahkan atau menghapus baris apa pun.
+    status = 'header_row_offset';
+  } else if (!hasAnyHeader) {
+    status = 'missing_header';
+    repairable = true;
+  } else if (prefixLength === spec.headers.length && !hasUnexpectedHeaders) {
+    status = Math.max(0, lastRow - 1) === 0 ? 'header_only' : 'ready';
+  } else if (prefixLength > 0 && !hasUnexpectedHeaders &&
+      foundHeaders.slice(prefixLength, spec.headers.length).every(function (value) { return value === ''; })) {
+    status = 'missing_trailing_headers';
+    repairable = true;
+  } else if (prefixLength === spec.headers.length && hasUnexpectedHeaders) {
+    status = 'unexpected_extra_headers';
+  } else {
+    status = 'header_mismatch';
+  }
+
+  const blankRows = scanBlankRows && lastRow > 1
+    ? countBlankDataRows_(sheet, lastRow, readWidth)
+    : (scanBlankRows ? { count: 0, rowNumbers: [], truncated: false } : null);
+  const detectedHeaderRow = shiftedHeaderRow || (prefixLength === spec.headers.length ? 1 : 0);
+
+  return {
+    name: spec.name,
+    phase: spec.phase,
+    purpose: spec.purpose,
+    status: status,
+    lastRow: lastRow,
+    headerRowDetected: detectedHeaderRow,
+    dataRowsAssumingHeader: Math.max(0, lastRow - (detectedHeaderRow || 1)),
+    blankDataRows: blankRows ? blankRows.count : null,
+    blankDataRowNumbers: blankRows ? blankRows.rowNumbers : null,
+    blankDataRowNumbersTruncated: blankRows ? blankRows.truncated : null,
+    foundHeaders: foundHeaders,
+    missingHeaders: missingHeaders,
+    headerPrefixLength: prefixLength,
+    repairable: repairable
+  };
+}
+
+/**
+ * Audit seluruh skema inti dengan operasi baca saja. Default-nya menghitung
+ * baris data yang sepenuhnya kosong (nilai sel tidak pernah dikembalikan).
+ * Gunakan {scanBlankRows:false} untuk audit header/metadata yang lebih ringan.
+ */
+function auditDatabaseSchema(options) {
+  const ss = getSpreadsheet();
+  if (!ss) return { success: false, readOnly: true, error: 'Spreadsheet tidak tersedia.' };
+  const scanBlankRows = !(options && options.scanBlankRows === false);
+
+  const sheets = DATABASE_SHEET_SCHEMA.map(function (spec) {
+    return inspectDatabaseSheet_(spec, ss.getSheetByName(spec.name), scanBlankRows);
+  });
+  const report = {
+    success: true,
+    readOnly: true,
+    timestamp: new Date().toISOString(),
+    spreadsheetId: SPREADSHEET_ID ? (SPREADSHEET_ID.slice(0, 6) + '…(disembunyikan)') : '(belum diisi)',
+    summary: {
+      total: sheets.length,
+      missingSheets: sheets.filter(function (item) { return item.status === 'missing_sheet'; }).length,
+      missingHeaders: sheets.filter(function (item) {
+        return ['missing_header', 'missing_trailing_headers'].indexOf(item.status) !== -1;
+      }).length,
+      headerOnly: sheets.filter(function (item) { return item.status === 'header_only'; }).length,
+      shiftedHeaders: sheets.filter(function (item) { return item.status === 'header_row_offset'; }).length,
+      mismatchedHeaders: sheets.filter(function (item) {
+        return ['header_mismatch', 'unexpected_extra_headers'].indexOf(item.status) !== -1;
+      }).length,
+      blankDataRows: scanBlankRows
+        ? sheets.reduce(function (total, item) { return total + (item.blankDataRows || 0); }, 0)
+        : null
+    },
+    sheets: sheets
+  };
+  if (!options) Logger.log(JSON.stringify(report, null, 2));
+  return report;
+}
+
+/**
+ * Audit relasi ID santri dan kardinalitas target tanpa menulis apa pun.
+ * Laporan hanya berisi hitungan/status/nomor baris, tidak mengembalikan nama,
+ * username, ID mentah, hash, token, atau isi pesan. Kolom Users dibaca terpilah
+ * agar Password_Hash tidak ikut dibaca.
+ */
+function auditStudentDataIntegrity(options) {
+  const ss = getSpreadsheet();
+  if (!ss) return { success: false, readOnly: true, error: 'Spreadsheet tidak tersedia.' };
+
+  const MAX_REPORTED_ROWS = 100;
+  const clean = function (value) {
+    return value === null || value === undefined ? '' : String(value).trim();
+  };
+  const keyOf = function (value) { return clean(value).toLowerCase(); };
+  const dataStartRowFor = function (sheetName, sheet, lastRow) {
+    const spec = DATABASE_SHEET_SCHEMA.filter(function (item) { return item.name === sheetName; })[0];
+    if (!spec || lastRow < 2) return 2;
+    const maxColumns = Math.max(1, Number(sheet.getMaxColumns ? sheet.getMaxColumns() : spec.headers.length) || 1);
+    const lastColumn = Math.max(0, Number(sheet.getLastColumn()) || 0);
+    const width = Math.min(maxColumns, Math.max(spec.headers.length, lastColumn));
+    let completeHeader = false;
+    if (sheetName === 'Users') {
+      // Header check in Users deliberately skips Password_Hash and Nama.
+      const idHeader = clean(sheet.getRange(1, 1, 1, 1).getValues()[0][0]);
+      const usernameHeader = clean(sheet.getRange(1, 2, 1, 1).getValues()[0][0]);
+      const roleHeader = clean(sheet.getRange(1, 4, 1, 1).getValues()[0][0]);
+      const relatedHeader = clean(sheet.getRange(1, 6, 1, 1).getValues()[0][0]);
+      completeHeader = idHeader === 'ID' && usernameHeader === 'Username' &&
+        roleHeader === 'Role' && relatedHeader === 'ID_Terkait';
+      // Jika header Users bergeser, baris header akan diabaikan oleh filter Role;
+      // jangan membaca kolom sensitif hanya untuk mencari offset.
+      if (!completeHeader) return 2;
+    } else {
+      const top = sheet.getRange(1, 1, 1, width).getValues()[0];
+      completeHeader = spec.headers.every(function (header, index) { return clean(top[index]) === header; });
+    }
+    if (completeHeader) return 2;
+    const offset = findSchemaHeaderRowOffset_(sheet, spec, lastRow, width);
+    return offset > 1 ? offset + 1 : 2;
+  };
+  const readColumn = function (sheetName, column) {
+    const sheet = ss.getSheetByName(sheetName);
+    if (!sheet) return { exists: false, rows: [], startRow: 2 };
+    const lastRow = Math.max(0, Number(sheet.getLastRow()) || 0);
+    const startRow = dataStartRowFor(sheetName, sheet, lastRow);
+    if (lastRow < startRow) return { exists: true, rows: [], startRow: startRow };
+    return {
+      exists: true,
+      startRow: startRow,
+      rows: sheet.getRange(startRow, column, lastRow - startRow + 1, 1).getValues().map(function (row) { return row[0]; })
+    };
+  };
+  const aliasTargets = Object.create(null);
+  const canonicalByKey = Object.create(null);
+  const canonicalRows = readColumn('Santri', 1);
+  const canonicalIds = new Set();
+  const canonicalIdCounts = Object.create(null);
+
+  canonicalRows.rows.forEach(function (value) {
+    const id = clean(value);
+    if (!id) return;
+    canonicalIds.add(id);
+    const key = keyOf(id);
+    if (!canonicalByKey[key]) canonicalByKey[key] = Object.create(null);
+    canonicalByKey[key][id] = true;
+    canonicalIdCounts[id] = (canonicalIdCounts[id] || 0) + 1;
+  });
+
+  const usersSheet = ss.getSheetByName('Users');
+  const users = [];
+  if (usersSheet) {
+    const lastRow = Math.max(0, Number(usersSheet.getLastRow()) || 0);
+    const startRow = dataStartRowFor('Users', usersSheet, lastRow);
+    const rowCount = Math.max(0, lastRow - startRow + 1);
+    if (rowCount > 0) {
+      // Baca A, B, D, F saja. Kolom C (Password_Hash) dan E (Nama) dilewati.
+      const ids = usersSheet.getRange(startRow, 1, rowCount, 1).getValues();
+      const usernames = usersSheet.getRange(startRow, 2, rowCount, 1).getValues();
+      const roles = usersSheet.getRange(startRow, 4, rowCount, 1).getValues();
+      const related = usersSheet.getRange(startRow, 6, rowCount, 1).getValues();
+      for (let i = 0; i < rowCount; i++) {
+        users.push({
+          row: startRow + i,
+          id: clean(ids[i][0]),
+          username: clean(usernames[i][0]),
+          role: clean(roles[i][0]).toLowerCase(),
+          idTerkait: clean(related[i][0])
+        });
+      }
+    }
+  }
+
+  const studentAccountRows = users.filter(function (user) { return user.role === 'santri'; });
+  const mappedStudentAccountRows = [];
+  const unmappedStudentAccountRows = [];
+  const ambiguousStudentAccountRows = [];
+  studentAccountRows.forEach(function (user) {
+    const candidates = Object.create(null);
+    [user.username, user.id].forEach(function (value) {
+      const matches = canonicalByKey[keyOf(value)] || {};
+      Object.keys(matches).forEach(function (canonicalId) { candidates[canonicalId] = true; });
+    });
+    const candidateIds = Object.keys(candidates);
+    if (candidateIds.length === 1) {
+      mappedStudentAccountRows.push(user.row);
+      [user.id, user.username].forEach(function (alias) {
+        const key = keyOf(alias);
+        if (!key) return;
+        if (!aliasTargets[key]) aliasTargets[key] = Object.create(null);
+        aliasTargets[key][candidateIds[0]] = true;
+      });
+    } else if (candidateIds.length > 1) {
+      ambiguousStudentAccountRows.push(user.row);
+    } else {
+      unmappedStudentAccountRows.push(user.row);
+    }
+  });
+
+  const resolveReference = function (value) {
+    const raw = clean(value);
+    if (!raw) return { status: 'blank', canonicalId: '' };
+    if (canonicalIds.has(raw)) return { status: 'canonical', canonicalId: raw };
+
+    const normalizedMatches = canonicalByKey[keyOf(raw)] || {};
+    const normalizedIds = Object.keys(normalizedMatches);
+    if (normalizedIds.length === 1) return { status: 'mapped_alias', canonicalId: normalizedIds[0] };
+    if (normalizedIds.length > 1) return { status: 'ambiguous', canonicalId: '' };
+
+    const aliasMatches = Object.keys(aliasTargets[keyOf(raw)] || {});
+    if (aliasMatches.length === 1) return { status: 'mapped_alias', canonicalId: aliasMatches[0] };
+    if (aliasMatches.length > 1) return { status: 'ambiguous', canonicalId: '' };
+    return { status: 'unmapped', canonicalId: '' };
+  };
+
+  const referenceSpecs = [
+    { name: 'Hafalan', column: 3 },
+    { name: 'Master_Hafalan', column: 2 },
+    { name: 'Target', column: 3 },
+    { name: 'Murojaah', column: 3 },
+    { name: 'Riwayat_Tes', column: 3 },
+    { name: 'Gamifikasi', column: 1 },
+    { name: 'Badge', column: 2 },
+    { name: 'Feedback', column: 2 },
+    { name: 'Notifikasi', column: 2 }
+  ];
+  const references = referenceSpecs.map(function (spec) {
+    const source = readColumn(spec.name, spec.column);
+    const counts = { canonical: 0, mappedAlias: 0, blank: 0, unmapped: 0, ambiguous: 0 };
+    const unmappedRows = [];
+    const ambiguousRows = [];
+    source.rows.forEach(function (value, index) {
+      const result = resolveReference(value);
+      if (result.status === 'mapped_alias') counts.mappedAlias++;
+      else counts[result.status]++;
+      const sheetRow = source.startRow + index;
+      if (result.status === 'unmapped' && unmappedRows.length < MAX_REPORTED_ROWS) unmappedRows.push(sheetRow);
+      if (result.status === 'ambiguous' && ambiguousRows.length < MAX_REPORTED_ROWS) ambiguousRows.push(sheetRow);
+    });
+    const unmappedTotal = counts.unmapped;
+    const ambiguousTotal = counts.ambiguous;
+    return {
+      sheet: spec.name,
+      exists: source.exists,
+      dataRows: source.rows.length,
+      canonicalMatches: counts.canonical,
+      mappedAliases: counts.mappedAlias,
+      blankIds: counts.blank,
+      unmappedIds: unmappedTotal,
+      ambiguousIds: ambiguousTotal,
+      unmappedRowNumbers: unmappedRows,
+      unmappedRowsTruncated: unmappedTotal > unmappedRows.length,
+      ambiguousRowNumbers: ambiguousRows,
+      ambiguousRowsTruncated: ambiguousTotal > ambiguousRows.length
+    };
+  });
+
+  const parentUsers = users.filter(function (user) { return user.role === 'ortu'; });
+  const parentLinks = { directCanonical: 0, mappedAlias: 0, blank: 0, unmapped: 0, ambiguous: 0 };
+  const parentLinkRows = { unmapped: [], ambiguous: [] };
+  parentUsers.forEach(function (user) {
+    const result = resolveReference(user.idTerkait);
+    if (result.status === 'canonical') parentLinks.directCanonical++;
+    else if (result.status === 'mapped_alias') parentLinks.mappedAlias++;
+    else parentLinks[result.status]++;
+    if (result.status === 'unmapped' && parentLinkRows.unmapped.length < MAX_REPORTED_ROWS) parentLinkRows.unmapped.push(user.row);
+    if (result.status === 'ambiguous' && parentLinkRows.ambiguous.length < MAX_REPORTED_ROWS) parentLinkRows.ambiguous.push(user.row);
+  });
+
+  const targetSheet = ss.getSheetByName('Target');
+  const rawTargetGroups = Object.create(null);
+  const canonicalTargetGroups = Object.create(null);
+  let targetDataRows = 0;
+  if (targetSheet) {
+    const targetIds = readColumn('Target', 3);
+    const startRow = targetIds.startRow;
+    const rowCount = targetIds.rows.length;
+    if (rowCount > 0) {
+      const months = targetSheet.getRange(startRow, 2, rowCount, 1).getValues();
+      for (let i = 0; i < rowCount; i++) {
+        const month = months[i][0] === null || months[i][0] === undefined ? '' : String(months[i][0]);
+        const rawId = targetIds.rows[i] === null || targetIds.rows[i] === undefined ? '' : String(targetIds.rows[i]);
+        if (!clean(month) || !clean(rawId)) continue;
+        targetDataRows++;
+        const rowNumber = startRow + i;
+        const rawGroupKey = JSON.stringify([rawId, month]);
+        if (!rawTargetGroups[rawGroupKey]) rawTargetGroups[rawGroupKey] = [];
+        rawTargetGroups[rawGroupKey].push(rowNumber);
+
+        const resolved = resolveReference(rawId);
+        if (resolved.canonicalId) {
+          const canonicalGroupKey = JSON.stringify([keyOf(resolved.canonicalId), month]);
+          if (!canonicalTargetGroups[canonicalGroupKey]) {
+            canonicalTargetGroups[canonicalGroupKey] = { rowNumbers: [], rawIdKeys: Object.create(null) };
+          }
+          canonicalTargetGroups[canonicalGroupKey].rowNumbers.push(rowNumber);
+          canonicalTargetGroups[canonicalGroupKey].rawIdKeys[rawId] = true;
+        }
+      }
+    }
+  }
+  const duplicateTargetGroups = [];
+  const crosswalkTargetGroups = [];
+  let duplicateTargetRowsBeyondFirst = 0;
+  Object.keys(rawTargetGroups).forEach(function (key) {
+    const rows = rawTargetGroups[key];
+    if (rows.length < 2) return;
+    duplicateTargetRowsBeyondFirst += rows.length - 1;
+    if (duplicateTargetGroups.length < MAX_REPORTED_ROWS) {
+      duplicateTargetGroups.push({ rowNumbers: rows.slice(0, MAX_REPORTED_ROWS), rowNumbersTruncated: rows.length > MAX_REPORTED_ROWS });
+    }
+  });
+  Object.keys(canonicalTargetGroups).forEach(function (key) {
+    const group = canonicalTargetGroups[key];
+    if (group.rowNumbers.length < 2 || Object.keys(group.rawIdKeys).length < 2) return;
+    if (crosswalkTargetGroups.length < MAX_REPORTED_ROWS) {
+      crosswalkTargetGroups.push({
+        rowNumbers: group.rowNumbers.slice(0, MAX_REPORTED_ROWS),
+        rowNumbersTruncated: group.rowNumbers.length > MAX_REPORTED_ROWS
+      });
+    }
+  });
+
+  const duplicateRawTargetGroupCount = Object.keys(rawTargetGroups).filter(function (key) { return rawTargetGroups[key].length > 1; }).length;
+  const crosswalkTargetGroupCount = Object.keys(canonicalTargetGroups).filter(function (key) {
+    const group = canonicalTargetGroups[key];
+    return group.rowNumbers.length > 1 && Object.keys(group.rawIdKeys).length > 1;
+  }).length;
+  const duplicateSantriIds = Object.keys(canonicalIdCounts).filter(function (id) { return canonicalIdCounts[id] > 1; }).length;
+  const report = {
+    success: true,
+    readOnly: true,
+    timestamp: new Date().toISOString(),
+    summary: {
+      santriRosterRows: canonicalRows.rows.length,
+      distinctSantriIds: canonicalIds.size,
+      duplicateSantriIds: duplicateSantriIds,
+      studentAccounts: studentAccountRows.length,
+      mappedStudentAccounts: mappedStudentAccountRows.length,
+      unmappedStudentAccounts: unmappedStudentAccountRows.length,
+      ambiguousStudentAccounts: ambiguousStudentAccountRows.length,
+      parentAccounts: parentUsers.length,
+      parentLinks: parentLinks,
+      targetRowsWithStudentAndMonth: targetDataRows,
+      duplicateTargetGroups: duplicateRawTargetGroupCount,
+      targetRowsBeyondFirstMatch: duplicateTargetRowsBeyondFirst,
+      targetGroupsAcrossIdAliases: crosswalkTargetGroupCount,
+      referenceRows: references.reduce(function (sum, item) { return sum + item.dataRows; }, 0),
+      unresolvedReferenceRows: references.reduce(function (sum, item) { return sum + item.unmappedIds; }, 0),
+      ambiguousReferenceRows: references.reduce(function (sum, item) { return sum + item.ambiguousIds; }, 0)
+    },
+    studentAccounts: {
+      mappedRows: mappedStudentAccountRows.slice(0, MAX_REPORTED_ROWS),
+      mappedRowsTruncated: mappedStudentAccountRows.length > MAX_REPORTED_ROWS,
+      unmappedRows: unmappedStudentAccountRows.slice(0, MAX_REPORTED_ROWS),
+      unmappedRowsTruncated: unmappedStudentAccountRows.length > MAX_REPORTED_ROWS,
+      ambiguousRows: ambiguousStudentAccountRows.slice(0, MAX_REPORTED_ROWS),
+      ambiguousRowsTruncated: ambiguousStudentAccountRows.length > MAX_REPORTED_ROWS
+    },
+    parentLinks: {
+      counts: parentLinks,
+      unmappedUserRows: parentLinkRows.unmapped,
+      unmappedRowsTruncated: parentLinks.unmapped > parentLinkRows.unmapped.length,
+      ambiguousUserRows: parentLinkRows.ambiguous,
+      ambiguousRowsTruncated: parentLinks.ambiguous > parentLinkRows.ambiguous.length
+    },
+    references: references,
+    targets: {
+      currentCodeBehavior: 'dashboard memilih target pertama per ID_Santri mentah per bulan; baris berulang dengan ID dan bulan yang sama tidak terpilih',
+      duplicateGroups: duplicateTargetGroups,
+      duplicateGroupsTruncated: duplicateRawTargetGroupCount > duplicateTargetGroups.length,
+      rowsBeyondFirstMatch: duplicateTargetRowsBeyondFirst,
+      crosswalkGroupsForReview: crosswalkTargetGroups,
+      crosswalkGroupsTruncated: crosswalkTargetGroupCount > crosswalkTargetGroups.length
+    }
+  };
+  if (!options) Logger.log(JSON.stringify(report, null, 2));
+  return report;
+}
+
+/**
+ * Perbaiki hanya sheet inti yang hilang atau header yang kosong/terpotong di
+ * ujung kanan. Default adalah dry-run; gunakan {apply:true} untuk menulis.
+ * Header yang tidak cocok atau memiliki kolom tambahan selalu dilewati.
+ */
+function repairMissingSchemaHeaders(options) {
+  const apply = !!(options && options.apply === true);
+  const ss = getSpreadsheet();
+  if (!ss) return { success: false, dryRun: !apply, error: 'Spreadsheet tidak tersedia.' };
+
+  if (!apply) {
+    const audit = DATABASE_SHEET_SCHEMA.map(function (spec) {
+      return inspectDatabaseSheet_(spec, ss.getSheetByName(spec.name));
+    });
+    const report = {
+      success: true,
+      dryRun: true,
+      planned: audit.filter(function (item) { return item.repairable; }),
+      skipped: audit.filter(function (item) { return !item.repairable; })
+    };
+    if (!options) Logger.log(JSON.stringify(report, null, 2));
+    return report;
+  }
+
+  const lock = LockService.getScriptLock();
+  if (!acquireLock(lock)) return { success: false, dryRun: false, code: 'E_BUSY', message: 'Sistem sedang sibuk; perbaikan skema belum dijalankan.' };
+
+  const repaired = [];
+  const skipped = [];
+  const errors = [];
+  let changed = false;
+  try {
+    for (let i = 0; i < DATABASE_SHEET_SCHEMA.length; i++) {
+      const spec = DATABASE_SHEET_SCHEMA[i];
+      const sheetBefore = ss.getSheetByName(spec.name);
+      const before = inspectDatabaseSheet_(spec, sheetBefore);
+      if (!before.repairable) {
+        skipped.push({ name: spec.name, status: before.status });
+        continue;
+      }
+
+      try {
+        let sheet = sheetBefore;
+        let action;
+        if (!sheet) {
+          sheet = ss.insertSheet(spec.name);
+          changed = true;
+          action = 'created_sheet_and_headers';
+        } else if (before.status === 'missing_header') {
+          action = 'wrote_missing_header';
+        } else {
+          action = 'appended_missing_trailing_headers';
+        }
+
+        const maxColumns = Math.max(1, Number(sheet.getMaxColumns ? sheet.getMaxColumns() : spec.headers.length) || 1);
+        if (maxColumns < spec.headers.length) {
+          sheet.insertColumnsAfter(maxColumns, spec.headers.length - maxColumns);
+          changed = true;
+        }
+
+        changed = true;
+        if (action === 'appended_missing_trailing_headers') {
+          const headersToWrite = spec.headers.slice(before.headerPrefixLength);
+          sheet.getRange(1, before.headerPrefixLength + 1, 1, headersToWrite.length).setValues([headersToWrite]);
+        } else {
+          sheet.getRange(1, 1, 1, spec.headers.length).setValues([spec.headers]);
+        }
+        changed = true;
+
+        const after = inspectDatabaseSheet_(spec, sheet);
+        const rowsPreserved = after.dataRowsAssumingHeader === before.dataRowsAssumingHeader;
+        const verified = ['header_only', 'ready'].indexOf(after.status) !== -1 && rowsPreserved;
+        if (!verified) {
+          errors.push({ name: spec.name, error: 'Verifikasi header gagal; baris data tidak ditulis atau dihapus oleh repair.' });
+        }
+        repaired.push({
+          name: spec.name,
+          action: action,
+          statusAfter: after.status,
+          dataRowsBefore: before.dataRowsAssumingHeader,
+          dataRowsAfter: after.dataRowsAssumingHeader,
+          verified: verified
+        });
+      } catch (e) {
+        errors.push({ name: spec.name, error: String(e) });
+      }
+    }
+
+    if (changed) {
+      try { SpreadsheetApp.flush(); } catch (flushError) { errors.push({ name: '(flush)', error: String(flushError) }); }
+      try { bumpDashVersion_(); } catch (cacheError) { Logger.log('Invalidasi cache setelah repair skema gagal: ' + cacheError); }
+    }
+  } finally {
+    try { if (changed) SpreadsheetApp.flush(); } catch (flushError) { /* laporkan hasil utama apa adanya */ }
+    lock.releaseLock();
+  }
+
+  return { success: errors.length === 0, dryRun: false, repaired: repaired, skipped: skipped, errors: errors };
+}
+
+/** Entry point eksplisit untuk menjalankan perbaikan setelah dry-run ditinjau. */
+function applyMissingSchemaHeaders() {
+  const report = repairMissingSchemaHeaders({ apply: true });
+  Logger.log(JSON.stringify(report, null, 2));
+  return report;
+}
+
 /**
  * Akuisisi lock dengan retry + backoff singkat.
  * Total tunggu dibatasi (LOCK_ATTEMPTS x LOCK_WAIT_MS) dan SELALU lebih pendek
@@ -722,11 +1358,8 @@ function getUserProfile(session) {
 // CONFIGURATION HELPER
 // ============================================================
 
-function getConfigMap() {
-  if (__configCache) return __configCache;
-  const sheet = getSheet('Config');
-  const data = sheet.getDataRange().getValues();
-  const map = {
+function defaultConfigMap_() {
+  return {
     AMBANG_SABQI_HARI: 30,
     INTERVAL_MULTIPLIER_LANCAR: 1.5,
     INTERVAL_MULTIPLIER_TERSENDAT: 0.5,
@@ -744,16 +1377,41 @@ function getConfigMap() {
     // benar-benar memindahkan riwayat lama ke sheet Arsip_*.
     ARCHIVE_AKTIF: 0
   };
+}
 
+function mergeConfigRows_(map, data) {
   for (let i = 1; i < data.length; i++) {
-    const key = String(data[i][0]).trim();
+    const key = String(data[i][0] || '').trim();
     const val = data[i][1];
     if (key && val !== '') {
       map[key] = !isNaN(Number(val)) ? Number(val) : val;
     }
   }
+  return map;
+}
+
+/** Baca Config untuk alur aplikasi lama; dapat membuat sheet bila setup belum ada. */
+function getConfigMap() {
+  if (__configCache) return __configCache;
+  const sheet = getSheet('Config');
+  const map = mergeConfigRows_(defaultConfigMap_(), sheet.getDataRange().getValues());
   __configCache = map;
   return map;
+}
+
+/**
+ * Baca Config tanpa membuat sheet dan tanpa mengubah cache global.
+ * Khusus diagnostik dan uji kering yang wajib benar-benar read-only.
+ */
+function getConfigMapReadOnly_() {
+  const map = defaultConfigMap_();
+  const sheet = getExistingSheet_('Config');
+  if (!sheet || sheet.getLastRow() < 2) return map;
+  const maxColumns = Math.max(1, Number(sheet.getMaxColumns ? sheet.getMaxColumns() : 3) || 1);
+  if (maxColumns < 2) return map;
+  const width = Math.min(3, maxColumns);
+  const data = sheet.getRange(1, 1, sheet.getLastRow(), width).getValues();
+  return mergeConfigRows_(map, data);
 }
 
 // ============================================================
@@ -1074,6 +1732,152 @@ function generateDailyMissions(santriId, config) {
 // ============================================================
 
 // --- 1. USTAZ DASHBOARD ---
+/**
+ * Mengurutkan aktivitas lintas sheet tanpa mengubah data sumber.
+ * Timestamp lebih presisi daripada tanggal setoran; bila tidak tersedia,
+ * tanggal yang dicatat dipakai sebagai fallback.
+ */
+function activityMillis_(timestamp, dateValue) {
+  const candidates = [timestamp, dateValue];
+  for (let i = 0; i < candidates.length; i++) {
+    const value = candidates[i];
+    if (value === null || value === undefined || value === '') continue;
+    const parsed = (Object.prototype.toString.call(value) === '[object Date]')
+      ? value.getTime()
+      : new Date(value).getTime();
+    if (!isNaN(parsed)) return parsed;
+  }
+  return 0;
+}
+
+/** Indeks setoran terakhir per santri untuk matriks Ustaz (satu kali baca). */
+function buildLatestSetoranIndex_(hafalanRows) {
+  const latestBySantri = Object.create(null);
+  const rows = Array.isArray(hafalanRows) ? hafalanRows : [];
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    const santriId = String(row[2] || '');
+    if (!santriId) continue;
+    const sortTime = activityMillis_(row[9], row[1]);
+    if (latestBySantri[santriId] && latestBySantri[santriId]._sortTime > sortTime) continue;
+    latestBySantri[santriId] = {
+      tgl: toDateStr(row[1] || row[9]),
+      surah: String(row[3] || ''),
+      ayatMulai: Number(row[4]) || 0,
+      ayatAkhir: Number(row[5]) || 0,
+      nilai: String(row[6] || ''),
+      _sortTime: sortTime
+    };
+  }
+  Object.keys(latestBySantri).forEach(function (id) { delete latestBySantri[id]._sortTime; });
+  return latestBySantri;
+}
+
+/**
+ * Ringkasan satu aktivitas terakhir dari sumber fakta Hafalan, Murojaah,
+ * dan Riwayat_Tes. Hanya menampilkan catatan yang ID-nya cocok persis dengan
+ * santri; fungsi ini tidak melakukan mapping atau migrasi ID.
+ */
+function latestStudentActivity_(santriId, hafalanRows, murojaahRows, testRows) {
+  const candidates = [];
+  const wantedId = String(santriId || '');
+  if (!wantedId) return null;
+
+  function add(rows, studentIndex, dateIndex, timestampIndex, buildEvent) {
+    const sourceRows = Array.isArray(rows) ? rows : [];
+    for (let i = 0; i < sourceRows.length; i++) {
+      const row = sourceRows[i];
+      if (String(row[studentIndex] || '') !== wantedId) continue;
+      const sortTime = activityMillis_(timestampIndex >= 0 ? row[timestampIndex] : '', row[dateIndex]);
+      const event = buildEvent(row);
+      if (!event || !event.detail) continue;
+      event.tgl = toDateStr(row[dateIndex] || (timestampIndex >= 0 ? row[timestampIndex] : ''));
+      event._sortTime = sortTime;
+      candidates.push(event);
+    }
+  }
+
+  add(hafalanRows, 2, 1, 9, function (row) {
+    const ayat = Number(row[4]) && Number(row[5])
+      ? `ayat ${Number(row[4])}-${Number(row[5])}` : '';
+    return {
+      type: 'Setoran',
+      title: 'Setoran hafalan',
+      detail: [String(row[3] || ''), ayat].filter(Boolean).join(' • '),
+      outcome: row[6] ? `Nilai ${String(row[6])}` : '',
+      actor: 'Ustaz'
+    };
+  });
+  add(murojaahRows, 2, 1, 6, function (row) {
+    return {
+      type: 'Murojaah',
+      title: `Murojaah ${String(row[3] || '').trim()}`.trim(),
+      detail: String(row[4] || ''),
+      outcome: 'Sesi selesai dicatat',
+      actor: String(row[5] || 'Santri')
+    };
+  });
+  add(testRows, 2, 1, -1, function (row) {
+    const ayat = Number(row[5]) && Number(row[6])
+      ? `ayat ${Number(row[5])}-${Number(row[6])}` : '';
+    return {
+      type: 'Tes',
+      title: 'Evaluasi hafalan',
+      detail: [String(row[4] || ''), ayat].filter(Boolean).join(' • '),
+      outcome: row[7] ? `Hasil ${String(row[7])}` : '',
+      actor: String(row[8] || 'Penguji')
+    };
+  });
+
+  if (!candidates.length) return null;
+  candidates.sort(function (a, b) { return b._sortTime - a._sortTime; });
+  const latest = candidates[0];
+  delete latest._sortTime;
+  return latest;
+}
+
+/** Ringkasan 7 hari Orang Tua; menghitung fakta histori tanpa mengubah sheet. */
+function buildWeeklySummary_(santriId, hafalanRows, murojaahRows, testRows) {
+  const endDate = appTodayStr();
+  const startDate = addDaysStr(-6);
+  const activeDates = Object.create(null);
+  const summary = {
+    startDate: startDate,
+    endDate: endDate,
+    activeDays: 0,
+    setoran: 0,
+    murojaah: 0,
+    evaluasi: 0,
+    hasilTes: { Lancar: 0, Tersendat: 0, Lupa: 0 },
+    totalAktivitas: 0
+  };
+  const wantedId = String(santriId || '');
+  if (!wantedId) return summary;
+
+  function count(rows, dateIndex, kind, resultIndex) {
+    const sourceRows = Array.isArray(rows) ? rows : [];
+    for (let i = 0; i < sourceRows.length; i++) {
+      const row = sourceRows[i];
+      if (String(row[2] || '') !== wantedId) continue;
+      const date = toDateStr(row[dateIndex]);
+      if (!date || date < startDate || date > endDate) continue;
+      summary[kind]++;
+      summary.totalAktivitas++;
+      activeDates[date] = true;
+      if (kind === 'evaluasi' && resultIndex >= 0) {
+        const result = String(row[resultIndex] || '');
+        if (Object.prototype.hasOwnProperty.call(summary.hasilTes, result)) summary.hasilTes[result]++;
+      }
+    }
+  }
+
+  count(hafalanRows, 1, 'setoran', -1);
+  count(murojaahRows, 1, 'murojaah', -1);
+  count(testRows, 1, 'evaluasi', 7);
+  summary.activeDays = Object.keys(activeDates).length;
+  return summary;
+}
+
 function ustazGetDashboard(session) {
   if (session.role !== 'ustaz') {
     return { success: false, code: 'E_FORBIDDEN', message: 'Akses khusus Ustaz' };
@@ -1091,6 +1895,8 @@ function ustazGetDashboard(session) {
   const masterIndex = buildMasterIndex_();
   const targetRows = readSheet_('Target', 6);
   const gamifRows = readSheet_('Gamifikasi', 6);
+  const hafalanRows = readSheet_('Hafalan', 10);
+  const lastSetoranBySantri = buildLatestSetoranIndex_(hafalanRows);
 
   const todayStr = appTodayStr();
   const currentMonthStr = todayStr.slice(0, 7);
@@ -1167,6 +1973,7 @@ function ustazGetDashboard(session) {
           surah: u.surah,
           ayatMulai: u.ayatMulai,
           ayatAkhir: u.ayatAkhir,
+          tglMulai: toDateStr(u.tglMulai),
           retentionStatus: u.retentionStatus
         };
       }
@@ -1231,6 +2038,7 @@ function ustazGetDashboard(session) {
       target: currentTarget,
       targetProgress: targetProgress,
       lastUnit: lastUnit,
+      lastSetoran: lastSetoranBySantri[idSantri] || null,
       flags: flags
     });
   }
@@ -1683,6 +2491,12 @@ function santriGetDashboard(session) {
     }
   }
 
+  // Ringkasan aktivitas faktual untuk menjawab "apa yang terakhir dilakukan?".
+  // Sumber setoran, murojaah, dan tes tetap histori terpisah di sheet masing-masing.
+  const hafalanRows = readSheet_('Hafalan', 10);
+  const testRows = readSheet_('Riwayat_Tes', 9);
+  const lastActivity = latestStudentActivity_(santriId, hafalanRows, murojaahRows, testRows);
+
   const result = {
     success: true,
     nama: session.nama,
@@ -1691,7 +2505,8 @@ function santriGetDashboard(session) {
     gamifikasi: gamifikasi,
     badges: badges,
     notifications: notifications.slice(-10).reverse(),
-    activityMap: activityMap
+    activityMap: activityMap,
+    lastActivity: lastActivity
   };
 
   dashCachePut_(cacheKey, result, SANTRI_CACHE_TTL_SEC);
@@ -1855,9 +2670,12 @@ function ortuGetDashboard(session) {
   let countKuning = 0;
   let countMerah = 0;
   const unitList = [];
+  let eligibleTestCount = 0;
 
   for (let i = 0; i < units.length; i++) {
     const status = units[i].retentionStatus || 'Hijau';
+    const testEligible = diffDaysFrom(units[i].tglMulai) >= 1;
+    if (testEligible) eligibleTestCount++;
     if (status === 'Hijau') countHijau++;
     else if (status === 'Kuning') countKuning++;
     else if (status === 'Merah') countMerah++;
@@ -1867,8 +2685,10 @@ function ortuGetDashboard(session) {
       surah: units[i].surah,
       ayatMulai: units[i].ayatMulai,
       ayatAkhir: units[i].ayatAkhir,
+      tglMulai: toDateStr(units[i].tglMulai),
       retentionStatus: status,
-      nextReview: units[i].nextReview
+      nextReview: units[i].nextReview,
+      testEligible: testEligible
     });
   }
 
@@ -1905,6 +2725,11 @@ function ortuGetDashboard(session) {
     }
   }
 
+  const hafalanRows = readSheet_('Hafalan', 10);
+  const murojaahRows = readSheet_('Murojaah', 7);
+  const lastActivity = latestStudentActivity_(santriId, hafalanRows, murojaahRows, tesRows);
+  const weeklySummary = buildWeeklySummary_(santriId, hafalanRows, murojaahRows, tesRows);
+
   const result = {
     success: true,
     ortuName: session.nama,
@@ -1926,6 +2751,9 @@ function ortuGetDashboard(session) {
       streak: streak
     },
     unitList: unitList,
+    eligibleTestCount: eligibleTestCount,
+    lastActivity: lastActivity,
+    weeklySummary: weeklySummary,
     recentTests: testHistory.slice(-100).reverse()
   };
 
@@ -2348,7 +3176,7 @@ function archiveOldRows(options) {
 
 /** Implementasi inti arsip (dipanggil dari archiveOldRows). */
 function archiveOldRowsRun_(opts, dryRun) {
-  const config = getConfigMap();
+  const config = dryRun ? getConfigMapReadOnly_() : getConfigMap();
   const bulan = Number(opts.bulan || config.ARCHIVE_AMBANG_BULAN || 6);
   const cutoff = monthsAgoFrom_(appTodayStr(), bulan);
   if (!cutoff) {
@@ -2373,9 +3201,15 @@ function archiveOldRowsRun_(opts, dryRun) {
     const spec = ARCHIVE_SHEET_SPECS[s];
     let sheet;
     try {
-      sheet = getSheet(spec.name);
+      // Uji kering harus benar-benar baca-saja: jangan membuat sheet sumber yang hilang.
+      sheet = dryRun ? getExistingSheet_(spec.name) : getSheet(spec.name);
     } catch (e) {
-      // Sheet tidak ada di instalasi ini → lewati, jangan gagalkan seluruh arsip.
+      // Sheet tidak tersedia di instalasi ini → lewati, jangan gagalkan seluruh arsip.
+      report.warnings.push('Sheet ' + spec.name + ' tidak ditemukan — dilewati.');
+      report.sheets[spec.name] = { ditemukan: 0, diarsipkan: 0, dihapus: 0, catatan: 'sheet tidak ditemukan' };
+      continue;
+    }
+    if (!sheet) {
       report.warnings.push('Sheet ' + spec.name + ' tidak ditemukan — dilewati.');
       report.sheets[spec.name] = { ditemukan: 0, diarsipkan: 0, dihapus: 0, catatan: 'sheet tidak ditemukan' };
       continue;
@@ -2443,13 +3277,16 @@ function archiveOldRowsRun_(opts, dryRun) {
     report.totalDihapus += rowNumbers.length;
   }
 
-  writeScriptProperty_(PROP_LAST_ARCHIVE_RUN, JSON.stringify({
-    at: new Date().toISOString(),
-    dryRun: dryRun,
-    cutoff: cutoff,
-    ditemukan: report.totalDitemukan,
-    dihapus: report.totalDihapus
-  }));
+  // Uji kering tidak menulis Script Property apa pun.
+  if (!dryRun) {
+    writeScriptProperty_(PROP_LAST_ARCHIVE_RUN, JSON.stringify({
+      at: new Date().toISOString(),
+      dryRun: dryRun,
+      cutoff: cutoff,
+      ditemukan: report.totalDitemukan,
+      dihapus: report.totalDihapus
+    }));
+  }
 
   if (!dryRun && report.totalDihapus > 0) bumpDashVersion_();
   return report;
@@ -2495,7 +3332,7 @@ function systemDiagnostics_() {
 
   // Config efektif (nilai penting saja)
   try {
-    const cfg = getConfigMap();
+    const cfg = getConfigMapReadOnly_();
     ['ARCHIVE_AMBANG_BULAN', 'ARCHIVE_AKTIF', 'SESSION_EXPIRY_JAM', 'AMBANG_SABQI_HARI',
       'INTERVAL_CAP_MAKS_HARI', 'RECOVERY_LANCAR_BERUNTUN_DIBUTUHKAN'].forEach(function (k) {
         out.config[k] = cfg[k];
@@ -2504,30 +3341,38 @@ function systemDiagnostics_() {
     out.warnings.push('Config tidak bisa dibaca: ' + e);
   }
 
-  // Jumlah baris sheet kunci
-  ['Users', 'Santri', 'Target', 'Hafalan', 'Master_Hafalan', 'Murojaah', 'Riwayat_Tes',
-    'Gamifikasi', 'Badge', 'Notifikasi', 'Feedback', 'Sessions', 'Cache_Ayat'].forEach(function (name) {
-      try { out.sheets[name] = Math.max(0, getSheet(name).getLastRow() - 1); }
-      catch (e) { out.sheets[name] = -1; }
-    });
-
-  // Pemeriksaan header kolom aditif (mudah terlewat saat migrasi manual)
+  // Audit semua sheet dan header dalam mode baca-saja.
   try {
-    const masterHeader = getSheet('Master_Hafalan').getRange(1, 1, 1, 12).getValues()[0];
-    if (String(masterHeader[11] || '') !== 'Consecutive_Lancar') {
-      out.warnings.push('Header Master_Hafalan kolom ke-12 bukan "Consecutive_Lancar" — Recovery Policy (Merah→Kuning 2x Lancar) tidak akan tercatat. Lihat SetupGuide bagian migrasi.');
-    }
-    const cacheHeader = getSheet('Cache_Ayat').getRange(1, 1, 1, 6).getValues()[0];
-    if (String(cacheHeader[5] || '') !== 'Teks_Indonesia') {
-      out.warnings.push('Header Cache_Ayat kolom ke-6 bukan "Teks_Indonesia" — terjemahan ayat tidak akan tersimpan.');
+    out.schema = auditDatabaseSchema({ scanBlankRows: false });
+    if (out.schema.success) {
+      out.schema.sheets.forEach(function (item) {
+        if (item.status === 'missing_sheet') {
+          out.warnings.push('Sheet ' + item.name + ' belum ada; buat sheet dan header sebelum fitur terkait dipakai.');
+        } else if (item.status === 'missing_header' || item.status === 'missing_trailing_headers') {
+          out.warnings.push('Header sheet ' + item.name + ' belum lengkap (' + item.status + '); audit/perbaikan skema dapat dijalankan.');
+        } else if (item.status === 'header_mismatch' || item.status === 'unexpected_extra_headers') {
+          out.warnings.push('Header sheet ' + item.name + ' berbeda dari skema; dilewati otomatis agar kolom/data yang mungkin kustom tidak tertimpa.');
+        }
+      });
+    } else {
+      out.warnings.push('Audit skema gagal: ' + (out.schema.error || 'Spreadsheet tidak tersedia.'));
     }
   } catch (e) {
-    out.warnings.push('Pemeriksaan header gagal: ' + e);
+    out.warnings.push('Pemeriksaan skema gagal: ' + e);
   }
+
+  // Jumlah baris sheet kunci; sheet hilang dilaporkan, bukan dibuat otomatis.
+  ['Users', 'Santri', 'Target', 'Hafalan', 'Master_Hafalan', 'Murojaah', 'Riwayat_Tes',
+    'Gamifikasi', 'Badge', 'Notifikasi', 'Feedback', 'Sessions', 'Cache_Ayat'].forEach(function (name) {
+      try {
+        const sheet = getExistingSheet_(name);
+        out.sheets[name] = sheet ? Math.max(0, sheet.getLastRow() - 1) : -1;
+      } catch (e) { out.sheets[name] = -1; }
+    });
 
   // Duplikat data (sumber bug "data dobel" dari versi lama)
   try {
-    const targetRows = readSheet_('Target', 6);
+    const targetRows = readExistingSheet_('Target', 6);
     const seenTarget = {};
     let dupTarget = 0;
     for (let i = 0; i < targetRows.length; i++) {
@@ -2537,7 +3382,7 @@ function systemDiagnostics_() {
     out.duplikat.target_santri_bulan = dupTarget;
     if (dupTarget > 0) out.warnings.push('Ada ' + dupTarget + ' baris Target kembar (santri+bulan sama) — target bisa tampil tidak konsisten.');
 
-    const masterRows = readSheet_('Master_Hafalan', 12);
+    const masterRows = readExistingSheet_('Master_Hafalan', 12);
     const seenUnit = {};
     let dupUnit = 0;
     for (let i = 0; i < masterRows.length; i++) {
@@ -2548,7 +3393,7 @@ function systemDiagnostics_() {
     out.duplikat.unit_hafalan = dupUnit;
     if (dupUnit > 0) out.warnings.push('Ada ' + dupUnit + ' unit Master_Hafalan kembar (santri+surah+ayat sama) — pertimbangkan penggabungan.');
 
-    const userRows = readSheet_('Users', 6);
+    const userRows = readExistingSheet_('Users', 6);
     const seenUser = {};
     let dupUser = 0;
     for (let i = 0; i < userRows.length; i++) {
@@ -2564,7 +3409,7 @@ function systemDiagnostics_() {
 
   // Kesehatan sheet Sessions (paling sering jadi sumber perlambatan)
   try {
-    const sessionRows = readSheet_('Sessions', 6);
+    const sessionRows = readExistingSheet_('Sessions', 6);
     const now = Date.now();
     let expired = 0;
     const seenToken = {};

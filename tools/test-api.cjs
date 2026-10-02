@@ -123,6 +123,31 @@ async function main() {
     check('mark notif read -> status berubah', notif.dibaca === true);
   }
 
+  // --- 4. ringkasan dashboard harus tersedia pada kontrak Mode Demo ---------
+  {
+    const { api } = buildSandbox(() => OK_RESPONSE({}));
+    api.APP_CONFIG.DATA_MODE = 'mock';
+
+    api.Auth.currentUser = { userId: 'USR-SANTRI-01', role: 'santri', nama: 'Uji Santri', idTerkait: '' };
+    const santri = await api.API.request('santri_get_dashboard');
+    check('dashboard Santri mock mengirim aktivitas terakhir', santri.success && santri.lastActivity && santri.lastActivity.title);
+
+    api.Auth.currentUser = { userId: 'USR-ORTU-01', role: 'ortu', nama: 'Orang Tua Uji', idTerkait: 'USR-SANTRI-01' };
+    const ortu = await api.API.request('ortu_get_dashboard');
+    check('dashboard Orang Tua mock mengirim aktivitas & jumlah kandidat tes',
+      ortu.success && ortu.lastActivity && Number.isFinite(ortu.eligibleTestCount));
+    check('dashboard Orang Tua mock menghitung ringkasan mingguan dari histori demo',
+      ortu.weeklySummary && ortu.weeklySummary.startDate && ortu.weeklySummary.endDate
+        && ortu.weeklySummary.setoran === 2 && ortu.weeklySummary.murojaah === 0
+        && ortu.weeklySummary.evaluasi === 1 && ortu.weeklySummary.activeDays === 3
+        && ortu.weeklySummary.hasilTes.Lancar === 1);
+
+    api.Auth.currentUser = { userId: 'USR-USTAZ-01', role: 'ustaz', nama: 'Ustaz Uji', idTerkait: '' };
+    const ustaz = await api.API.request('ustaz_get_dashboard');
+    check('dashboard Ustaz mock mengirim setoran terakhir per santri',
+      ustaz.success && ustaz.santriList.some(s => s.lastSetoran && s.lastSetoran.tgl));
+  }
+
   console.log('\nMode Live (klasifikasi error):');
 
   // --- 4a. timeout -> E_TIMEOUT + retryable + uncertain untuk aksi tulis ----

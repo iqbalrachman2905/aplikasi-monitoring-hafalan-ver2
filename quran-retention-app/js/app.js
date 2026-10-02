@@ -116,6 +116,7 @@ const App = {
       : '<span>🧒 Mode Anak</span>';
     btn.classList.toggle('btn-gold', active);
     btn.classList.toggle('btn-outline', !active);
+    btn.setAttribute('aria-pressed', String(active));
   },
 
   /**
@@ -258,9 +259,11 @@ const App = {
       }
       if (tabMissionsBtn) {
         tabMissionsBtn.className = 'btn btn-outline btn-sm';
+        tabMissionsBtn.setAttribute('aria-pressed', 'false');
       }
       if (tabFlashcardBtn) {
         tabFlashcardBtn.className = 'btn btn-primary btn-sm';
+        tabFlashcardBtn.setAttribute('aria-pressed', 'true');
       }
     } else {
       if (flashcardSection) flashcardSection.classList.add('hidden');
@@ -270,9 +273,11 @@ const App = {
       }
       if (tabFlashcardBtn) {
         tabFlashcardBtn.className = 'btn btn-outline btn-sm';
+        tabFlashcardBtn.setAttribute('aria-pressed', 'false');
       }
       if (tabMissionsBtn) {
         tabMissionsBtn.className = 'btn btn-primary btn-sm';
+        tabMissionsBtn.setAttribute('aria-pressed', 'true');
       }
     }
   }

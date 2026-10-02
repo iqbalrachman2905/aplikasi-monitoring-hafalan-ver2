@@ -60,24 +60,24 @@ const MOCK_STATE = {
 
   activityHeatmap: {
     'USR-SANTRI-01': {
-      '2026-09-07': 3,
-      '2026-09-06': 2,
-      '2026-09-05': 1,
-      '2026-09-04': 2,
-      '2026-09-03': 3,
-      '2026-09-02': 1,
-      '2026-09-01': 2
+      [appDateStrAfter(-6)]: 3,
+      [appDateStrAfter(-5)]: 2,
+      [appDateStrAfter(-4)]: 1,
+      [appDateStrAfter(-3)]: 2,
+      [appDateStrAfter(-2)]: 3,
+      [appDateStrAfter(-1)]: 1
     }
   },
 
+  // Tanggal contoh bergerak relatif terhadap hari ini agar demo tetap relevan.
   riwayatTes: [
-    { idTes: 'TES-001', tgl: '2026-09-06', idSantri: 'USR-SANTRI-01', surah: "An-Naba'", ayatMulai: 1, ayatAkhir: 10, kualitas: 'Lancar', pelapor: 'Orang Tua: Bapak Ridwan' },
-    { idTes: 'TES-002', tgl: '2026-09-05', idSantri: 'USR-SANTRI-01', surah: "'Abasa", ayatMulai: 1, ayatAkhir: 15, kualitas: 'Lupa', pelapor: 'Orang Tua: Bapak Ridwan' }
+    { idTes: 'TES-001', tgl: appDateStrAfter(-1), idSantri: 'USR-SANTRI-01', surah: "An-Naba'", ayatMulai: 1, ayatAkhir: 10, kualitas: 'Lancar', pelapor: 'Orang Tua: Bapak Ridwan' },
+    { idTes: 'TES-002', tgl: appDateStrAfter(-32), idSantri: 'USR-SANTRI-01', surah: "'Abasa", ayatMulai: 1, ayatAkhir: 15, kualitas: 'Lupa', pelapor: 'Orang Tua: Bapak Ridwan' }
   ],
 
   setoranHistory: [
-    { idHafalan: 'HAF-001', tgl: '2026-09-06', idSantri: 'USR-SANTRI-01', surah: "An-Naba'", ayatMulai: 1, ayatAkhir: 20, nilai: 'A', catatan: 'Makhraj huruf shad dan tho sangat rapi.' },
-    { idHafalan: 'HAF-002', tgl: '2026-09-04', idSantri: 'USR-SANTRI-01', surah: "An-Nazi'at", ayatMulai: 1, ayatAkhir: 15, nilai: 'B+', catatan: 'Lancar, perhatikan mad jaiz munfashil.' }
+    { idHafalan: 'HAF-001', tgl: appDateStrAfter(-2), idSantri: 'USR-SANTRI-01', surah: "An-Naba'", ayatMulai: 1, ayatAkhir: 20, nilai: 'A', catatan: 'Makhraj huruf shad dan tho sangat rapi.' },
+    { idHafalan: 'HAF-002', tgl: appDateStrAfter(-4), idSantri: 'USR-SANTRI-01', surah: "An-Nazi'at", ayatMulai: 1, ayatAkhir: 15, nilai: 'B+', catatan: 'Lancar, perhatikan mad jaiz munfashil.' }
   ],
 
   // Log konfirmasi murojaah (mirror sheet Murojaah di Code.gs) — dipakai untuk

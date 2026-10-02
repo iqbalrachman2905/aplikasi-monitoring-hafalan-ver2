@@ -13,6 +13,7 @@ Aplikasi web mobile-first modern bertema Islami dengan arsitektur **Spaced Repet
 - **Gamifikasi Positif:** Tingkatan Level, XP, Lencana (Badges), dan Streak 🔥 harian berbasis *qualifying activity*.
 - **Heatmap 30 Hari:** Visualisasi konsistensi murojaah bulanan.
 - **Inbox Notifikasi & Feedback:** Pesan bimbingan dari Ustaz dan doa/apresiasi dari Orang Tua.
+- **Aktivitas terakhir & langkah berikutnya:** ringkasan setoran/murojaah/tes terbaru serta CTA menuju misi yang belum selesai.
 
 ### 2. 👨‍👩‍👦 Dashboard Orang Tua (1-Click Random Testing)
 - **Rapor Traffic Light:** Indikator visual instan kesehatan hafalan (*🟢 Hijau: Aman, 🟡 Kuning: Perlu Perhatian, 🔴 Merah: Kritis*).
@@ -20,13 +21,15 @@ Aplikasi web mobile-first modern bertema Islami dengan arsitektur **Spaced Repet
 - **Audio Murattal Bantuan:** Pemutar audio qari merdu dengan visualisasi gelombang suara (*waveform*) sebagai referensi saat menguji anak.
 - **Evaluasi 1-Klik:** Tombol evaluasi instan (*🟢 Lancar [+5 XP Bonus], 🟡 Tersendat, 🔴 Lupa [Masuk Recovery]*).
 - **Kirim Semangat:** Kirim doa dan kata-kata motivasi instan ke dashboard anak.
+- **Fokus dan tren:** lihat aktivitas terakhir, saran tindakan menurut status retensi, riwayat tes, ringkasan 7 hari (setoran, murojaah, evaluasi, dan hari aktif), serta tren skor bulanan.
 
 ### 3. 👨‍🏫 Dashboard Ustaz (Group Monitoring & Auto-Flags)
 - **Matriks Kelompok & Traffic Light:** Pantau status retensi seluruh santri dalam satu layar.
-- **Auto-Flag Engine:** Peringatan otomatis jika ada santri berstatus Merah, streak terputus, atau jadwal review terlewat.
+- **Auto-Flag Engine:** Peringatan otomatis untuk unit Merah, streak terputus, atau ≥2 review terlewat. Auto-flag atas **penurunan performa** sesuai PRD belum tersedia karena kriteria perbandingannya perlu ditetapkan agar tidak menyesatkan.
 - **Input Setoran Cepat:** Catat setoran hafalan baru dengan nilai mutu (A/B+/B/C), catatan makhraj/tajwid, dan otomatis masuk ke antrean retensi.
 - **Target Bulanan:** Tetapkan target surah dan rentang ayat per santri.
 - **Feedback & Broadcast:** Kirim koreksi spesifik per santri atau siarkan pesan motivasi ke seluruh santri.
+- **Setoran terakhir & prioritas:** lihat ringkasan setoran dan tindakan yang disarankan; matriks berubah menjadi kartu berlabel pada layar ponsel.
 
 ---
 
@@ -72,7 +75,7 @@ Proyek ini tanpa build step & tanpa dependency. Cukup jalankan dev server statis
 
 ```bash
 npm start        # dev server statis, default di http://localhost:8080/
-npm run verify   # cek sintaks + paritas + 85 uji otomatis (API, retensi, arsip)
+npm run verify   # cek sintaks + paritas + 151 pemeriksaan otomatis (API, retensi, arsip, skema, dashboard)
 ```
 
 Atau tanpa Node: `cd quran-retention-app && python -m http.server 8080`.
@@ -148,6 +151,15 @@ const APP_CONFIG = {
 
 ---
 
+## 📱 Perbaikan v4.5 (Audit PRD, Kejelasan Role & Mobile UX)
+
+- **Santri:** kartu aktivitas terakhir lintas setoran/murojaah/evaluasi dan CTA langsung ke misi tertunda; semua misi selesai mengarahkan ke flashcard.
+- **Orang Tua:** aktivitas terakhir, ringkasan 7 hari dari setoran/murojaah/evaluasi, prioritas tes menurut retensi, alasan nonaktif sebelum unit berumur satu hari, serta tren skor bulanan tanpa library eksternal.
+- **Ustaz:** ringkasan setoran terbaru per santri (tanggal/nilai) dan CTA tindak lanjut prioritas; matriks menjadi kartu berlabel pada layar kecil.
+- **Mobile/accessibility:** browser zoom diizinkan, tab Santri membungkus, kontrol utama punya area sentuh lebih besar, status tab/Mode Anak memiliki atribut ARIA.
+- Perubahan kontrak dashboard hanya baca/aditif; **tidak ada mutasi spreadsheet live, migrasi ID, atau perubahan kebijakan target bulanan**.
+- Batas yang diketahui: jawaban flashcard belum menjadi histori aktivitas terpisah; tren bulanan butuh hasil tes pada minimal dua bulan; Auto-Flag penurunan performa belum tersedia karena aturan pembandingnya belum ditetapkan. Ringkasan pekanan hanya merangkum catatan yang benar-benar tersimpan, bukan notifikasi terjadwal.
+
 ## 🗄️ Perbaikan v4.4 (Performa & Perawatan Data)
 
 | Area | Perubahan |
@@ -177,7 +189,7 @@ Fokus rilis ini: **memutus lingkaran "putus–nyambung"** (data besar → reques
 | ⏰ Trigger malam | `ensureNightlyTrigger()` memasang trigger otomatis saat login sukses (dulu harus manual — bila lupa, `Sessions` tumbuh tanpa batas dan `validateSession` makin lambat). Token kedaluwarsa juga dibersihkan *lazy* saat ditemukan |
 | 🩺 `healthCheck()` | Status sistem: versi, zona waktu, trigger terpasang?, `lastNightlyRun`, jumlah baris sheet kunci, plus daftar peringatan |
 | 🚫 Setup via HTTP dihapus | Endpoint `setup_database` + `SETUP_SECRET` **dihapus**. `setupInitialDatabase()` hanya dijalankan dari editor Apps Script (fungsi GAS tidak terkspos HTTP) |
-| 🧪 Uji otomatis | `npm run verify` = cek sintaks (10 file JS + `Code.gs`) + **uji paritas mock↔backend** + **24 uji lapisan API** (mock, taksonomi error, retry aman). CI menjalankan ini **sebelum** deploy |
+| 🧪 Uji otomatis | `npm run verify` = cek sintaks + paritas mock↔backend + **151 pemeriksaan** (API, retensi, arsip, audit skema, ringkasan pekanan Ortu, kontrak dashboard & UX mobile). CI menjalankan ini **sebelum** deploy |
 | 🙈 Kebocoran | Folder `backend/` (berisi ID spreadsheet & panduan setup) dan dokumen internal **tidak lagi** ikut terbit ke GitHub Pages |
 | 👤 Operator | `SPREADSHEET_ID` bisa dipindahkan ke Script Properties (tanpa edit kode); backend melaporkan versinya sehingga frontend bisa memperingatkan **"backend masih versi lama, buat deployment baru"** |
 | ⚡ Performa baca | Dashboard Ustaz dari **O(santri × baris)** menjadi **O(baris)**: `Master_Hafalan` dibaca **sekali** lalu diindeks per santri; jumlah `getDataRange()` turun **34 → 3** (kolom minimal) |

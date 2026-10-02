@@ -36,8 +36,10 @@ Panduan ini memandu Anda langkah demi langkah untuk mengonfigurasi Google Spread
 
 ---
 
-## 3. Jalankan Inisialisasi Database Otomatis
+## 3. Jalankan Inisialisasi Database Otomatis (hanya spreadsheet baru/kosong)
 Anda tidak perlu membuat 14 sheet satu per satu secara manual! Fungsi `setupInitialDatabase()` telah diprogram untuk membuat semua struktur sheet, kolom header, formula config, dan akun demo secara otomatis.
+
+> ⚠️ **Jangan jalankan `setupInitialDatabase()` pada spreadsheet lama/live atau yang berisi data.** Fungsi ini mengosongkan dan mengisi ulang 14 sheet. Untuk database yang sudah digunakan, pakai audit dan repair terbatas pada bagian 3a.
 
 1. Di dropdown fungsi pada toolbar Apps Script, pilih fungsi: **`setupInitialDatabase`**.
 2. Klik tombol **Run (Jalankan)**.
@@ -45,9 +47,10 @@ Anda tidak perlu membuat 14 sheet satu per satu secara manual! Fungsi `setupInit
 4. Tunggu beberapa detik hingga proses selesai dengan log:
    `"Seluruh 14 sheet dan data inisialisasi PRD v4 berhasil dibuat di Spreadsheet!"`
 5. Jika Anda sudah punya spreadsheet dari versi sebelumnya **jangan** menjalankan ulang
-   `setupInitialDatabase()` (isinya akan terhapus). Cukup tambahkan 2 kolom aditif berikut
-   pada baris header — nilainya akan diisi otomatis oleh aplikasi:
-   - `Master_Hafalan`: kolom ke-12 **`Consecutive_Lancar`** (untuk Recovery Policy: Merah→Kuning butuh 2x Lancar berturut-turut).
+   `setupInitialDatabase()` (isinya akan terhapus). Gunakan audit/perbaikan aman pada
+   bagian 3a; bila dua header aditif ini memang hilang dan header sebelumnya cocok,
+   `applyMissingSchemaHeaders()` menambahkannya tanpa mengubah baris data:
+   - `Master_Hafalan`: kolom ke-12 **`Consecutive_Lancar`** (Recovery Policy: Merah→Kuning butuh 2x Lancar berturut-turut).
    - `Cache_Ayat`: kolom ke-6 **`Teks_Indonesia`** (terjemahan ayat untuk modal Tes Acak Ortu).
 
    Kolom `Password_Hash` tidak perlu diubah: hash baru berformat `salt$hash`, dan hash
@@ -67,6 +70,48 @@ Anda tidak perlu membuat 14 sheet satu per satu secara manual! Fungsi `setupInit
    - `Config`
    - `Sessions`
    - `Cache_Ayat`
+
+---
+
+## 3a. Audit dan Perbaikan Skema Aman untuk Spreadsheet yang Sudah Berisi Data
+
+Gunakan bagian ini untuk spreadsheet lama/live. Semua fungsi tersedia di dropdown
+Apps Script setelah `Code.gs` terbaru disimpan. Sebelum menjalankan fungsi, pastikan
+Script Property `SPREADSHEET_ID` (atau spreadsheet aktif yang dipakai) menunjuk ke
+file yang benar. Audit default membaca baris data secara bertahap hanya untuk
+menghitung baris yang sepenuhnya kosong; laporan hanya mengembalikan jumlah dan
+nomor baris (maksimal 100 nomor per sheet), bukan isi record. Sheet arsip
+`Arsip_Murojaah`, `Arsip_Riwayat_Tes`, dan `Arsip_Notifikasi` dibuat oleh fitur
+arsip; wajar bila belum ada.
+
+1. Jalankan **`auditDatabaseSchema()`** dan baca laporan di Execution log. Laporan
+   menunjukkan sheet hilang, header kosong/terpotong, header yang berbeda/bergeser,
+   sheet yang baru berisi header, baris data sepenuhnya kosong, dan fungsi tiap sheet
+   dalam alur HAFAL → JAGA → UJI → PUTUSKAN → LANJUT. Tidak ada sheet atau nilai
+   yang dibuat/diubah.
+2. Jalankan **`auditStudentDataIntegrity()`** untuk dry-run relasi ID. Laporan hanya
+   berisi hitungan/status dan nomor baris (maksimal 100 per kategori)—bukan nama,
+   ID mentah, hash, token, atau isi pesan. Ia menandai alias ID yang dapat dipetakan,
+   relasi yang belum jelas, duplikasi ID-target persis, serta target yang berbeda
+   format ID tetapi mengarah ke santri-bulan yang sama. Fungsi ini tidak mengubah data;
+   jangan migrasikan ID atau menghapus target berdasarkan laporan tanpa pemetaan
+   dan keputusan pemilik data.
+3. Jalankan **`repairMissingSchemaHeaders()`** untuk melihat dry-run di Execution log. Ini hanya
+   merencanakan pembuatan sheet inti yang hilang dan header kosong/kolom ujung yang
+   hilang; header berbeda dan header yang terdeteksi bergeser ke baris lebih bawah
+   sengaja dilewati. Baris tidak dipindah otomatis.
+4. Tinjau log dry-run terlebih dahulu. Jika sesuai, jalankan **`applyMissingSchemaHeaders()`**
+   secara eksplisit. Fungsi ini hanya membuat sheet/header yang hilang dan mengisi
+   header kosong atau suffix header yang hilang. Ia tidak menghapus, memindahkan,
+   mengisi ulang, atau mengedit baris data; jumlah baris data diverifikasi kembali.
+5. Jalankan lagi **`auditDatabaseSchema()`** untuk memverifikasi hasil. Bila status
+   `header_mismatch`, `unexpected_extra_headers`, atau `header_row_offset`, jangan
+   paksa repair otomatis; tinjau posisi/header mapping secara manual sebelum
+   migrasi apa pun.
+
+Perbaikan aman ini **tidak** membuat seed akun/demo dan bukan pengganti setup
+pertama. Baris `Users`/data lain yang belum ada tetap harus diinisialisasi secara
+terpisah dengan prosedur yang disetujui pemilik database.
 
 ---
 
