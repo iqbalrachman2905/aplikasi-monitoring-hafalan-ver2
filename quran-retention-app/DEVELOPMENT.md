@@ -4,7 +4,7 @@ Dokumen kerja untuk **Aplikasi Monitoring Hafalan Al-Qur'an Berbasis Retensi**.
 Berisi cara menjalankan, peta arsitektur, catatan perbaikan bug, dan checklist
 pengembangan (sudah selesai maupun rencana).
 
-> Versi dokumen: 4.4.0 • Terakhir diperbarui: 1 Oktober 2026
+> Versi dokumen: 4.5.0 • Terakhir diperbarui: 2 Oktober 2026
 
 ---
 
@@ -48,7 +48,7 @@ cd quran-retention-app && python -m http.server 8080
 ### Verifikasi sebelum commit
 ```bash
 npm run check   # sintaks 10 file JS + Code.gs + paritas mock↔backend + penjaga performa/arsip
-npm test        # 24 uji API + 28 uji retensi/paritas + 33 uji simulasi arsip = 85 uji
+npm test        # uji API, retensi/paritas, arsip, audit skema, & ringkasan dashboard
 npm run verify  # keduanya sekaligus
 ```
 
@@ -69,7 +69,14 @@ aplikasi-monitoring-hafalan/
 ├── tools/
 │   ├── serve.cjs               # dev server statis (menyajikan quran-retention-app/)
 │   ├── check-syntax.cjs        # parse semua js/*.js
-│   └── test-flashcard.cjs      # uji logika flashcard
+│   ├── check-backend.cjs       # parse/sanity check Code.gs
+│   ├── check-api-parity.cjs    # kontrak action & penjaga regresi
+│   ├── test-api.cjs            # uji wrapper API/mock
+│   ├── test-retention.cjs      # paritas retention engine
+│   ├── test-archive.cjs        # keselamatan arsip pada spreadsheet tiruan
+│   ├── test-schema-audit.cjs   # audit skema/ID tanpa menulis data
+│   ├── test-dashboard-guidance.cjs # uji ringkasan peran & UX mobile
+│   └── test-flashcard.cjs      # uji logika flashcard (historis, bukan npm test)
 └── quran-retention-app/
     ├── index.html              # SPA: header, 4 view (login/santri/ortu/ustaz), modal
     ├── DEVELOPMENT.md          # dokumen ini
@@ -92,9 +99,9 @@ aplikasi-monitoring-hafalan/
 ```
 
 ### Kontrak data penting
-- `ustaz_get_dashboard.santriList[]` → `{ idSantri, nama, retention{hijau,kuning,merah,overdue}, gamifikasi{xp,level,currentStreak}, target{bulan,surah,ayatMulai,ayatAkhir}, targetProgress{covered,total,percent}, lastUnit, flags }`
-- `ortu_get_dashboard` → `{ retention{hijau,kuning,merah,total}, gamifikasi, unitList[], recentTests[] }`
-- `santri_get_dashboard.missions` → `{ sabaq: Array, sabqi: Array, manzil: Array }` (**`sabaq` berupa array**)
+- `ustaz_get_dashboard.santriList[]` → `{ idSantri, nama, retention, gamifikasi, target, targetProgress, lastUnit, lastSetoran, flags }`
+- `ortu_get_dashboard` → `{ retention, gamifikasi, unitList[], eligibleTestCount, lastActivity, recentTests[] }`
+- `santri_get_dashboard` → `{ missions{sabaq,sabqi,manzil}, lastActivity, activityMap, notifications[] }` (**`sabaq` berupa array**)
 - Skor kompetensi/potensi dihitung dari bobot di `APP_CONFIG.COMPETENCY`
   (Hijau 100 • Kuning 60 • Merah 20) via `appCompetencyLabel()`.
 
@@ -111,7 +118,26 @@ aplikasi-monitoring-hafalan/
 
 ---
 
-## 4. Catatan Perbaikan Bug (v4.1)
+## 4. Catatan Perbaikan Bug & UX
+
+### v4.5.0 — Audit PRD, kejelasan dashboard & mobile (2 Oktober 2026)
+
+- ✅ Ketiga role mendapat ringkasan **aktivitas terakhir** dan **tindakan berikutnya**; saran menggunakan misi/retensi/target yang benar-benar dikirim API.
+- ✅ Santri dapat memulai misi tertunda langsung dari kartu prioritas; jika semua misi selesai, CTA beralih ke flashcard.
+- ✅ Orang Tua melihat aktivitas terbaru lintas setoran/murojaah/tes, ringkasan 7 hari (jumlah setoran, murojaah, evaluasi, hari aktif dan kategori hasil tes), rekomendasi fokus retensi, dan tren skor bulanan. Tombol tes nonaktif dengan alasan yang jelas bila belum ada unit berumur minimal satu hari.
+- ✅ Ustaz melihat setoran terakhir per santri (tanggal/nilai), satu tindak lanjut prioritas, dan matriks berbentuk kartu pada layar kecil.
+- ✅ Zoom browser tidak lagi dikunci; tab Santri dapat membungkus rapi, kontrol sentuh lebih besar, label kolom matriks tetap terbaca di ponsel, serta status tab/Mode Anak diumumkan secara aksesibel.
+- ✅ Penambahan kontrak dashboard bersifat baca-saja/aditif. Tidak ada mutasi spreadsheet, migrasi ID, atau perubahan kebijakan target bulanan.
+- ⚠️ Batas histori yang diketahui: jawaban flashcard individu belum dicatat sebagai aktivitas terpisah di backend; aktivitas terakhir merangkum setoran, murojaah, dan evaluasi yang tersimpan.
+
+Fitur grand design yang masih di backlog (bukan cakupan perubahan ini): ekspor laporan PDF/WhatsApp Ustaz, progres target per juz, perbandingan multi-anak, pengalaman audio-first pra-literasi, pengingat/PWA, serta notifikasi WhatsApp/email terjadwal.
+
+| Role | Cakupan inti PRD yang ditemukan di kode/API | Catatan batas |
+|---|---|---|
+| Santri | Misi Sabaq/Sabqi/Manzil, konfirmasi murojaah, flashcard/audio, XP/streak, heatmap, badge, notifikasi/feedback | Percobaan flashcard per jawaban belum menjadi baris histori tersendiri; kartu aktivitas menampilkan setoran, murojaah, dan tes yang tersimpan. |
+| Orang Tua | Rapor retensi, tes acak berbobot (Merah/terlambat), audio, evaluasi sekali klik, riwayat tes, apresiasi, peta kompetensi, tren bulanan, ringkasan 7 hari | Perbandingan multi-anak belum tersedia. Kandidat tes baru dapat dipilih setelah unit berumur ≥1 hari; ringkasan 7 hari adalah panel dashboard, bukan pesan terjadwal. |
+| Ustaz | Target bulanan, catat setoran, matriks retensi, auto-flag, feedback, usulan target lanjutan, notifikasi progres target, broadcast | Auto-flag penurunan performa belum ada; kriterianya perlu ditetapkan. Ekspor laporan dan checklist target per juz juga belum tersedia. |
+| Lintas role/mobile | Kartu aktivitas terakhir + saran tindakan, ringkasan pekanan Ortu, zoom browser aktif, kontrol Santri responsif, matriks Ustaz berbentuk kartu pada viewport kecil | Perubahan ini diverifikasi lewat tes sumber/kontrak; belum dijalankan pada perangkat fisik atau deployment GAS live. |
 
 | # | Bug | Dampak | Status |
 |---|---|---|---|
@@ -138,7 +164,7 @@ aplikasi-monitoring-hafalan/
 
 ---
 
-## 5. Pengembangan per Peran (v4.1)
+## 5. Pengembangan per Peran (v4.1–v4.5)
 
 ### 👦 Peran 1 — Santri (UI ramah anak & kemudahan)
 - **Mode Anak** (`#btn-toggle-kid-mode`): teks & tombol lebih besar, kontras lebih
@@ -148,6 +174,10 @@ aplikasi-monitoring-hafalan/
   ⭐ (0–3)** berdasarkan persentase misi selesai.
 - **Bahasa anak**: label misi (“Hafalan baru hari ini ✨”, “Ayo diulang 📚”) dan
   tombol aksi (“▶ Kerjakan”) saat Mode Anak aktif, plus maskot 🧒📖✨.
+- **Aktivitas terakhir**: ringkasan setoran/murojaah/tes terbaru yang tersimpan,
+  dengan tanggal, hasil, dan pelapor bila tersedia.
+- **Langkah berikutnya**: CTA memilih misi tertunda pertama; saat semua misi selesai,
+  CTA membawa ke flashcard. Misi tertunda tetap ditampilkan di daftar lengkap.
 
 ### 👨‍🏫 Peran 2 — Ustaz (kemudahan target & pengembangan potensi)
 - **Peta Potensi Santri** (`#ustaz-potensi-container`): skor 0–100 tiap santri
@@ -159,6 +189,10 @@ aplikasi-monitoring-hafalan/
 - **Tombol 🎯 Target pada tiap baris santri** (selain tombol di header) agar pengaturan target langsung terjangkau.
 - **Notifikasi Target Bulanan**: baris per santri dengan progres ayat (`covered/total`), status **✅ Tercapai / ⚠️ Mendesak (N hari) / ⏰ Terlewat / 🕒 Berjalan**, diurutkan dari yang paling perlu ditindak.
 - Validasi rentang ayat (`mulai ≤ akhir`).
+- **Riwayat setoran terakhir per santri**: surah, rentang ayat, tanggal, dan nilai;
+  ringkasan kelompok memilih satu tindak lanjut prioritas yang membuka aksi relevan.
+- **Matriks responsif**: tabel desktop berubah menjadi kartu berlabel di ponsel;
+  aksi Setor/Target/Feedback tetap bisa disentuh tanpa scroll horizontal tabel.
 
 ### 👨‍👩‍👦 Peran 3 — Orang Tua (peta kompetensi anak)
 - **Peta Kompetensi Ananda** (`#ortu-kompetensi-map`): per surah berisi skor,
@@ -169,6 +203,14 @@ aplikasi-monitoring-hafalan/
   tindakan berbahasa orang tua.
 - **Filter riwayat tes per bulan**: dropdown bulan yang dibangun otomatis dari
   riwayat, dengan pesan kosong yang jelas untuk bulan tanpa data.
+- **Aktivitas terakhir + fokus sekarang**: kartu membuka ringkasan terakhir yang
+  tersimpan dan menyarankan tes/dukungan sesuai retensi; tes dinonaktifkan dengan
+  penjelasan bila belum ada unit berumur minimal satu hari.
+- **Ringkasan 7 hari terakhir**: hitungan setoran, murojaah, evaluasi, hari aktif,
+  dan distribusi kategori hasil tes; dihitung dari baris histori yang tersimpan,
+  menggunakan batas tanggal zona waktu aplikasi.
+- **Tren hasil evaluasi bulanan**: rata-rata kategori Lancar/Tersendat/Lupa dari
+  `Riwayat_Tes`; butuh data pada ≥2 bulan untuk menggambar tren.
 
 ---
 
@@ -273,8 +315,9 @@ M = sedang, L = besar.
   target yang bisa dibagikan ke grup WhatsApp kelompok *(M)*
 - [ ] **Ustaz: target per juz + checklist capaian otomatis** — peta juz 1–30 dari
   `Master_Hafalan`, persentase tamat per juz *(M)*
-- [ ] **Ortu: grafik tren kompetensi antar bulan** — visualisasi riwayat skor dari
-  `Riwayat_Tes` (sparkline, tanpa library eksternal) *(S)*
+- [x] **Ortu: grafik tren hasil evaluasi antar bulan** — rata-rata skor Lancar/Tersendat/Lupa dari `Riwayat_Tes` (grafik bar ringan, tanpa library eksternal); membutuhkan tes di minimal dua bulan agar tren terlihat *(S, v4.5.0)*
+- [x] **Ortu: ringkasan aktivitas tujuh hari** — jumlah setoran, murojaah, evaluasi, hari aktif, dan kategori hasil tes berdasarkan tanggal aplikasi; panel dashboard, bukan notifikasi terjadwal *(S, v4.5.0)*
+- [ ] **Ustaz: Auto-Flag penurunan performa** — tetapkan kriteria pembanding yang aman (mis. unit hafalan yang sama) sebelum membuat flag agar hasil tes acak lintas-unit tidak menyesatkan *(S)*
 - [ ] **Ortu: mode banding antar anak** — dukungan `ID_Terkait` multi-santri untuk
   keluarga dengan >1 hafizh *(S)*
 - [ ] **Santri: mode "cerita/audio-first"** untuk anak pra-literasi — misi berbasis

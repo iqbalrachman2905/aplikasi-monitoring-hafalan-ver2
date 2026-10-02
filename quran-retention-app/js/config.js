@@ -16,7 +16,7 @@ const APP_CONFIG = {
   DATA_MODE: 'api',
 
   // Versi Aplikasi (WAJIB sama dengan APP_VERSION di backend/Code.gs)
-  APP_VERSION: '4.4.0',
+  APP_VERSION: '4.5.0',
 
   // Kebijakan batas waktu & pengulangan request.
   // Penting: waktu tunggu KLIEN harus LEBIH PANJANG dari waktu tunggu lock di

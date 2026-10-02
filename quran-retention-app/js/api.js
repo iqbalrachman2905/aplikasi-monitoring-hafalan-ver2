@@ -281,6 +281,89 @@ const API = {
     return 'USR-SANTRI-01';
   },
 
+  /** Aktivitas terakhir Mode Demo; bentuk respons sama dengan kontrak backend. */
+  latestMockStudentActivity(santriId) {
+    const events = [];
+    const add = (rows, idOf, dateOf, title, detailOf, outcomeOf, actorOf, type) => {
+      (Array.isArray(rows) ? rows : []).forEach(row => {
+        if (String(idOf(row) || '') !== String(santriId || '')) return;
+        const date = String(dateOf(row) || '');
+        const timestamp = String(row.timestamp || date);
+        const sortTime = Date.parse(timestamp) || Date.parse(date) || 0;
+        const detail = String(detailOf(row) || '').trim();
+        if (!detail) return;
+        events.push({
+          type,
+          title,
+          detail,
+          outcome: String(outcomeOf(row) || ''),
+          actor: String(actorOf(row) || ''),
+          tgl: date.slice(0, 10),
+          _sortTime: sortTime
+        });
+      });
+    };
+
+    add(MOCK_STATE.setoranHistory, r => r.idSantri, r => r.tgl, 'Setoran hafalan',
+      r => `${r.surah || ''}${r.ayatMulai ? ` • ayat ${r.ayatMulai}-${r.ayatAkhir}` : ''}`,
+      r => r.nilai ? `Nilai ${r.nilai}` : '', () => 'Ustaz', 'Setoran');
+    add(MOCK_STATE.murojaahLog, r => r.idSantri, r => r.tgl, 'Murojaah',
+      r => `${r.jenisMisi || 'Murojaah'} • ${r.detail || ''}`,
+      () => 'Sesi selesai dicatat', r => r.pelapor || 'Santri', 'Murojaah');
+    add(MOCK_STATE.riwayatTes, r => r.idSantri, r => r.tgl, 'Evaluasi hafalan',
+      r => `${r.surah || ''}${r.ayatMulai ? ` • ayat ${r.ayatMulai}-${r.ayatAkhir}` : ''}`,
+      r => r.kualitas ? `Hasil ${r.kualitas}` : '', r => r.pelapor || 'Penguji', 'Tes');
+
+    if (!events.length) return null;
+    events.sort((a, b) => b._sortTime - a._sortTime);
+    const latest = events[0];
+    delete latest._sortTime;
+    return latest;
+  },
+
+  /** Ringkasan aktivitas tujuh hari Mode Demo (mirror backend). */
+  buildMockWeeklySummary(santriId) {
+    const endDate = appTodayStr();
+    const startDate = appDateStrAfter(-6);
+    const activeDates = new Set();
+    const summary = {
+      startDate, endDate, activeDays: 0,
+      setoran: 0, murojaah: 0, evaluasi: 0,
+      hasilTes: { Lancar: 0, Tersendat: 0, Lupa: 0 },
+      totalAktivitas: 0
+    };
+    const count = (rows, kind) => (Array.isArray(rows) ? rows : []).forEach(row => {
+      if (String(row.idSantri || '') !== String(santriId || '')) return;
+      const date = String(row.tgl || '').slice(0, 10);
+      if (!date || date < startDate || date > endDate) return;
+      summary[kind]++;
+      summary.totalAktivitas++;
+      activeDates.add(date);
+      if (kind === 'evaluasi' && Object.prototype.hasOwnProperty.call(summary.hasilTes, row.kualitas)) {
+        summary.hasilTes[row.kualitas]++;
+      }
+    });
+    count(MOCK_STATE.setoranHistory, 'setoran');
+    count(MOCK_STATE.murojaahLog, 'murojaah');
+    count(MOCK_STATE.riwayatTes, 'evaluasi');
+    summary.activeDays = activeDates.size;
+    return summary;
+  },
+
+  /** Setoran terbaru per santri untuk kartu/matriks Ustaz di Mode Demo. */
+  latestMockSetoran(santriId) {
+    const rows = (MOCK_STATE.setoranHistory || []).filter(r => String(r.idSantri || '') === String(santriId || ''));
+    rows.sort((a, b) => (Date.parse(b.timestamp || b.tgl || '') || 0) - (Date.parse(a.timestamp || a.tgl || '') || 0));
+    const row = rows[0];
+    return row ? {
+      tgl: String(row.tgl || '').slice(0, 10),
+      surah: String(row.surah || ''),
+      ayatMulai: Number(row.ayatMulai) || 0,
+      ayatAkhir: Number(row.ayatAkhir) || 0,
+      nilai: String(row.nilai || '')
+    } : null;
+  },
+
   /**
    * Daily Mission Generator sisi klien (mirror generateDailyMissions() di Code.gs).
    * Sabaq = unit terbaru, Sabqi = umur 1..30 hari, Manzil = >30 hari / Merah / overdue.
@@ -382,6 +465,7 @@ const API = {
             surah: terbaru.surah,
             ayatMulai: terbaru.ayatMulai,
             ayatAkhir: terbaru.ayatAkhir,
+            tglMulai: terbaru.tglMulai,
             retentionStatus: terbaru.retentionStatus
           } : null;
 
@@ -408,6 +492,7 @@ const API = {
             target: target ? { bulan: target.bulan, surah: target.surah, ayatMulai: target.ayatMulai, ayatAkhir: target.ayatAkhir } : null,
             targetProgress: targetProgress,
             lastUnit: lastUnit,
+            lastSetoran: this.latestMockSetoran(s.idSantri),
             flags: flags
           };
         });
@@ -442,7 +527,8 @@ const API = {
           ayatMulai: Number(d.ayatMulai),
           ayatAkhir: Number(d.ayatAkhir),
           nilai: nilai,
-          catatan: d.catatan || ''
+          catatan: d.catatan || '',
+          timestamp: new Date().toISOString()
         });
 
         // Tambah/update Master_Hafalan lewat retention engine (nilai C tidak lagi
@@ -579,7 +665,8 @@ const API = {
           gamifikasi: gamif,
           badges: badges,
           notifications: notifs.slice(-10).reverse(),
-          activityMap: heatmap
+          activityMap: heatmap,
+          lastActivity: this.latestMockStudentActivity(sId)
         };
       }
 
@@ -627,7 +714,8 @@ const API = {
           idSantri: sId,
           jenisMisi: d.jenisMisi || 'Sabaq',
           detail: `${d.surah || ''} (${mulai}-${akhir})`,
-          pelapor: (user && user.nama) || 'Santri'
+          pelapor: (user && user.nama) || 'Santri',
+          timestamp: new Date().toISOString()
         });
 
         return {
@@ -684,7 +772,10 @@ const API = {
             currentStreak: Number(gamif.currentStreak) || 0,
             longestStreak: Number(gamif.longestStreak) || 0
           },
-          unitList: masters,
+          unitList: masters.map(m => Object.assign({}, m, { testEligible: Number(m.diffDays) >= 1 })),
+          eligibleTestCount: masters.filter(m => Number(m.diffDays) >= 1).length,
+          lastActivity: this.latestMockStudentActivity(sId),
+          weeklySummary: this.buildMockWeeklySummary(sId),
           recentTests: MOCK_STATE.riwayatTes.filter(t => t.idSantri === sId)
         };
       }
@@ -746,7 +837,8 @@ const API = {
           ayatMulai: Number(d.targetAyat) || 1,
           ayatAkhir: Number(d.targetAyat) || 1,
           kualitas: d.kualitas,
-          pelapor: 'Orang Tua: ' + ((user && user.nama) || 'Orang Tua')
+          pelapor: 'Orang Tua: ' + ((user && user.nama) || 'Orang Tua'),
+          timestamp: new Date().toISOString()
         });
 
         // Event-driven retention cache update (mirror ortuSubmitTestResult).

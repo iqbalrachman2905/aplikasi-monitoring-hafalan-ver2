@@ -2,7 +2,7 @@
 <html lang="id">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>Mutaba'ah Qur'an — Retention Engine</title>
   <meta name="description" content="Aplikasi Monitoring & Retensi Hafalan Al-Qur'an Berbasis Spaced Repetition (PRD v4)">
   
@@ -47,7 +47,7 @@
 
         <div id="header-user-badge" class="user-badge hidden">
           <span id="header-user-role" style="font-weight: 800; color: var(--emerald-800);">Santri</span>
-          <span style="color: var(--border-light)">|</span>
+          <span class="header-profile-divider" aria-hidden="true" style="color: var(--border-light)">|</span>
           <span id="header-user-name" style="color: var(--text-main);">Hafizh</span>
         </div>
         <button id="btn-logout" class="btn btn-ghost btn-sm hidden" title="Keluar">
@@ -165,33 +165,51 @@
         </div>
 
         <!-- Tab Navigasi Santri -->
-        <div class="flex gap-2" style="margin-bottom: 1.25rem;">
-          <button id="tab-btn-missions" class="btn btn-primary btn-sm" onclick="App.switchSantriTab('missions')">
+        <div class="santri-tabs" role="group" aria-label="Menu latihan Santri">
+          <button id="tab-btn-missions" class="btn btn-primary btn-sm" type="button" aria-controls="santri-section-missions" aria-pressed="true" onclick="App.switchSantriTab('missions')">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3L22 4"></path><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path></svg>
             <span>Misi Harian</span>
           </button>
-          <button id="tab-btn-flashcard" class="btn btn-outline btn-sm" onclick="App.switchSantriTab('flashcard')">
+          <button id="tab-btn-flashcard" class="btn btn-outline btn-sm" type="button" aria-controls="santri-section-flashcard" aria-pressed="false" onclick="App.switchSantriTab('flashcard')">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"></rect><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"></path></svg>
             <span>Flashcard Tebak Ayat</span>
           </button>
-          <button id="btn-toggle-kid-mode" class="btn btn-outline btn-sm" type="button" title="Tampilan lebih besar & ramah anak">
+          <button id="btn-toggle-kid-mode" class="btn btn-outline btn-sm" type="button" aria-pressed="false" title="Tampilan lebih besar & ramah anak">
             <span>🧒 Mode Anak</span>
           </button>
         </div>
 
         <!-- PAPAN PROGRES RAMAH ANAK -->
-        <div class="card kid-progress-card" style="margin-bottom: 1.25rem;">
+        <div class="card kid-progress-card" style="margin-bottom: 1.25rem;" aria-live="polite">
           <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
             <div style="font-weight: 800; color: var(--emerald-950);">🎯 Progres Murojaah Hari Ini</div>
             <div id="santri-daily-stars" style="font-size: 1.1rem;">☆☆☆</div>
           </div>
           <div class="xp-progress-bar" style="background: var(--border-light);">
-            <div id="santri-daily-progress-fill" class="xp-progress-fill" style="width: 0%;"></div>
+            <div id="santri-daily-progress-fill" class="xp-progress-fill" role="progressbar" aria-label="Progres murojaah hari ini" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" style="width: 0%;"></div>
           </div>
           <div style="display: flex; justify-content: space-between; font-size: 0.8rem; margin-top: 0.45rem;">
             <span id="santri-daily-progress-text" style="color: var(--text-muted);">Belum ada misi hari ini</span>
             <span id="santri-daily-progress-pct" style="font-weight: 800; color: var(--emerald-700);">0%</span>
           </div>
+        </div>
+
+        <!-- Ringkasan cepat: apa yang terakhir dilakukan dan satu langkah berikutnya. -->
+        <div class="dashboard-guidance-grid" aria-label="Ringkasan aktivitas dan langkah berikutnya">
+          <article class="guidance-card" aria-labelledby="santri-last-activity-heading">
+            <div class="guidance-kicker">SUDAH DILAKUKAN</div>
+            <h3 id="santri-last-activity-heading" class="guidance-heading">Aktivitas terakhir</h3>
+            <div id="santri-last-activity-title" class="guidance-title" aria-live="polite">Memuat aktivitas…</div>
+            <p id="santri-last-activity-detail" class="guidance-detail"></p>
+            <p id="santri-last-activity-meta" class="guidance-meta"></p>
+          </article>
+          <article class="guidance-card guidance-card-next" aria-labelledby="santri-next-step-heading">
+            <div class="guidance-kicker">LANGKAH BERIKUTNYA</div>
+            <h3 id="santri-next-step-heading" class="guidance-heading">Prioritas hari ini</h3>
+            <div id="santri-next-step-title" class="guidance-title" aria-live="polite">Menyiapkan misi…</div>
+            <p id="santri-next-step-detail" class="guidance-detail"></p>
+            <button id="santri-next-step-button" class="btn btn-primary btn-sm guidance-action" type="button">Mulai misi</button>
+          </article>
         </div>
 
         <!-- SECTION A: MISI HARIAN -->
@@ -343,6 +361,34 @@
           </div>
         </div>
 
+        <div class="dashboard-guidance-grid" aria-label="Aktivitas terakhir dan langkah berikutnya untuk Ananda">
+          <article class="guidance-card" aria-labelledby="ortu-last-activity-heading">
+            <div class="guidance-kicker">SUDAH DILAKUKAN</div>
+            <h3 id="ortu-last-activity-heading" class="guidance-heading">Aktivitas terakhir Ananda</h3>
+            <div id="ortu-last-activity-title" class="guidance-title" aria-live="polite">Memuat aktivitas…</div>
+            <p id="ortu-last-activity-detail" class="guidance-detail"></p>
+            <p id="ortu-last-activity-meta" class="guidance-meta"></p>
+          </article>
+          <article class="guidance-card guidance-card-next" aria-labelledby="ortu-next-summary-heading">
+            <div class="guidance-kicker">LANGKAH BERIKUTNYA</div>
+            <h3 id="ortu-next-summary-heading" class="guidance-heading">Dukungan untuk Ananda</h3>
+            <div id="ortu-next-summary-title" class="guidance-title" aria-live="polite">Menyiapkan rekomendasi…</div>
+            <p id="ortu-next-summary-detail" class="guidance-detail"></p>
+          </article>
+        </div>
+
+        <section class="card weekly-summary-card" aria-labelledby="ortu-weekly-summary-heading">
+          <div class="card-header-clean">
+            <div>
+              <h3 id="ortu-weekly-summary-heading" class="card-title">🗓️ Ringkasan 7 Hari Terakhir</h3>
+              <p class="weekly-summary-intro">Aktivitas yang tersimpan untuk membantu keluarga melihat rutinitas ananda.</p>
+            </div>
+          </div>
+          <div id="ortu-weekly-summary" aria-live="polite">
+            <p class="trend-empty">Menyiapkan ringkasan pekanan…</p>
+          </div>
+        </section>
+
         <!-- PETA KOMPETENSI ANADA (Orang Tua) -->
         <div class="card" style="margin-bottom: 1.25rem;">
           <div class="card-header-clean">
@@ -361,11 +407,12 @@
           <!-- 1-Click Smart Random Test Button -->
           <div class="card text-center" style="background: var(--grad-emerald); color: white; border: none; padding: 1.5rem;">
             <div style="font-size: 2rem; margin-bottom: 0.5rem;">🎲</div>
-            <h3 style="font-size: 1.15rem; font-weight: 800; color: white;">Tes Hafalan Acak Pintar</h3>
-            <p style="font-size: 0.8rem; color: var(--emerald-100); margin: 0.5rem 0 1rem 0;">
-              Sistem memilih otomatis ayat yang perlu diuji tanpa Ayah/Bunda perlu mengetik surah. Dilengkapi audio murattal!
+            <div class="guidance-kicker guidance-kicker-light">LANGKAH BERIKUTNYA</div>
+            <h3 id="ortu-next-test-title" style="font-size: 1.15rem; font-weight: 800; color: white;">Tes Hafalan Acak Pintar</h3>
+            <p id="ortu-next-test-detail" style="font-size: 0.8rem; color: var(--emerald-100); margin: 0.5rem 0 1rem 0;">
+              Sistem memilih ayat yang perlu diuji dan lebih memprioritaskan hafalan yang perlu perhatian.
             </p>
-            <button class="btn btn-gold btn-full btn-lg" onclick="DashboardOrtu.startRandomTest()">
+            <button id="ortu-random-test-button" class="btn btn-gold btn-full btn-lg" type="button" onclick="DashboardOrtu.startRandomTest()">
               <span>Mulai Uji Ananda (1-Klik)</span>
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
             </button>
@@ -383,6 +430,16 @@
             </button>
           </div>
         </div>
+
+        <!-- Ringkasan tren historis dari hasil tes yang benar-benar tersimpan. -->
+        <section class="card" style="margin-bottom: 1.5rem;" aria-labelledby="ortu-test-trend-heading">
+          <div class="card-header-clean">
+            <h3 id="ortu-test-trend-heading" class="card-title">📈 Tren Hasil Evaluasi Bulanan</h3>
+          </div>
+          <div id="ortu-test-trend">
+            <p class="trend-empty">Memuat riwayat evaluasi…</p>
+          </div>
+        </section>
 
         <!-- Detail Unit Hafalan & Status Retensi -->
         <div class="card" style="margin-bottom: 1.5rem;">
@@ -458,10 +515,28 @@
           </div>
         </div>
 
+        <!-- Ringkasan prioritas untuk Ustaz: setoran terakhir + tindakan yang disarankan. -->
+        <div class="dashboard-guidance-grid" aria-label="Aktivitas dan tindak lanjut kelompok">
+          <article class="guidance-card" aria-labelledby="ustaz-last-action-heading">
+            <div class="guidance-kicker">SUDAH DILAKUKAN</div>
+            <h3 id="ustaz-last-action-heading" class="guidance-heading">Setoran terakhir kelompok</h3>
+            <div id="ustaz-last-action-title" class="guidance-title" aria-live="polite">Memuat aktivitas…</div>
+            <p id="ustaz-last-action-detail" class="guidance-detail"></p>
+            <p id="ustaz-last-action-meta" class="guidance-meta"></p>
+          </article>
+          <article class="guidance-card guidance-card-next" aria-labelledby="ustaz-next-action-heading">
+            <div class="guidance-kicker">TINDAKAN YANG DISARANKAN</div>
+            <h3 id="ustaz-next-action-heading" class="guidance-heading">Prioritas kelompok</h3>
+            <div id="ustaz-next-action-title" class="guidance-title" aria-live="polite">Menentukan prioritas…</div>
+            <p id="ustaz-next-action-detail" class="guidance-detail"></p>
+            <button id="ustaz-next-action-button" class="btn btn-primary btn-sm guidance-action" type="button">Buka tindak lanjut</button>
+          </article>
+        </div>
+
         <!-- Auto-Flag Warnings -->
         <div style="margin-bottom: 1.25rem;">
           <div style="font-size: 0.85rem; font-weight: 700; color: var(--text-main); margin-bottom: 0.5rem; display: flex; align-items: center; gap: 0.4rem;">
-            <span>🚨 Sistem Peringatan Otomatis (Auto-Flag Engine)</span>
+            <span>🚨 Perlu perhatian (peringatan otomatis)</span>
           </div>
           <div id="ustaz-autoflag-container">
             <!-- Auto-flag cards -->
@@ -499,8 +574,8 @@
             </button>
           </div>
 
-          <div style="overflow-x: auto;">
-            <table style="width: 100%; border-collapse: collapse; text-align: left; font-size: 0.875rem;">
+          <div class="ustaz-table-scroll">
+            <table class="ustaz-matrix-table" aria-label="Matriks status retensi santri">
               <thead>
                 <tr style="border-bottom: 2px solid var(--border-light); color: var(--text-muted); font-size: 0.75rem; text-transform: uppercase;">
                   <th style="padding: 0.75rem;">Nama & Target</th>

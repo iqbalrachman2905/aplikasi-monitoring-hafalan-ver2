@@ -15,7 +15,7 @@
 
 // Versi backend. WAJIB dinaikkan bersamaan dengan APP_VERSION di js/config.js
 // agar frontend bisa mendeteksi "backend tertinggal" (deployment versi lama).
-const APP_VERSION = '4.4.0';
+const APP_VERSION = '4.5.0';
 
 // ID Spreadsheet default. TIDAK perlu diedit lagi di kode: nilai ini hanya
 // dipakai bila Script Property 'SPREADSHEET_ID' belum diisi.
@@ -1732,6 +1732,152 @@ function generateDailyMissions(santriId, config) {
 // ============================================================
 
 // --- 1. USTAZ DASHBOARD ---
+/**
+ * Mengurutkan aktivitas lintas sheet tanpa mengubah data sumber.
+ * Timestamp lebih presisi daripada tanggal setoran; bila tidak tersedia,
+ * tanggal yang dicatat dipakai sebagai fallback.
+ */
+function activityMillis_(timestamp, dateValue) {
+  const candidates = [timestamp, dateValue];
+  for (let i = 0; i < candidates.length; i++) {
+    const value = candidates[i];
+    if (value === null || value === undefined || value === '') continue;
+    const parsed = (Object.prototype.toString.call(value) === '[object Date]')
+      ? value.getTime()
+      : new Date(value).getTime();
+    if (!isNaN(parsed)) return parsed;
+  }
+  return 0;
+}
+
+/** Indeks setoran terakhir per santri untuk matriks Ustaz (satu kali baca). */
+function buildLatestSetoranIndex_(hafalanRows) {
+  const latestBySantri = Object.create(null);
+  const rows = Array.isArray(hafalanRows) ? hafalanRows : [];
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    const santriId = String(row[2] || '');
+    if (!santriId) continue;
+    const sortTime = activityMillis_(row[9], row[1]);
+    if (latestBySantri[santriId] && latestBySantri[santriId]._sortTime > sortTime) continue;
+    latestBySantri[santriId] = {
+      tgl: toDateStr(row[1] || row[9]),
+      surah: String(row[3] || ''),
+      ayatMulai: Number(row[4]) || 0,
+      ayatAkhir: Number(row[5]) || 0,
+      nilai: String(row[6] || ''),
+      _sortTime: sortTime
+    };
+  }
+  Object.keys(latestBySantri).forEach(function (id) { delete latestBySantri[id]._sortTime; });
+  return latestBySantri;
+}
+
+/**
+ * Ringkasan satu aktivitas terakhir dari sumber fakta Hafalan, Murojaah,
+ * dan Riwayat_Tes. Hanya menampilkan catatan yang ID-nya cocok persis dengan
+ * santri; fungsi ini tidak melakukan mapping atau migrasi ID.
+ */
+function latestStudentActivity_(santriId, hafalanRows, murojaahRows, testRows) {
+  const candidates = [];
+  const wantedId = String(santriId || '');
+  if (!wantedId) return null;
+
+  function add(rows, studentIndex, dateIndex, timestampIndex, buildEvent) {
+    const sourceRows = Array.isArray(rows) ? rows : [];
+    for (let i = 0; i < sourceRows.length; i++) {
+      const row = sourceRows[i];
+      if (String(row[studentIndex] || '') !== wantedId) continue;
+      const sortTime = activityMillis_(timestampIndex >= 0 ? row[timestampIndex] : '', row[dateIndex]);
+      const event = buildEvent(row);
+      if (!event || !event.detail) continue;
+      event.tgl = toDateStr(row[dateIndex] || (timestampIndex >= 0 ? row[timestampIndex] : ''));
+      event._sortTime = sortTime;
+      candidates.push(event);
+    }
+  }
+
+  add(hafalanRows, 2, 1, 9, function (row) {
+    const ayat = Number(row[4]) && Number(row[5])
+      ? `ayat ${Number(row[4])}-${Number(row[5])}` : '';
+    return {
+      type: 'Setoran',
+      title: 'Setoran hafalan',
+      detail: [String(row[3] || ''), ayat].filter(Boolean).join(' • '),
+      outcome: row[6] ? `Nilai ${String(row[6])}` : '',
+      actor: 'Ustaz'
+    };
+  });
+  add(murojaahRows, 2, 1, 6, function (row) {
+    return {
+      type: 'Murojaah',
+      title: `Murojaah ${String(row[3] || '').trim()}`.trim(),
+      detail: String(row[4] || ''),
+      outcome: 'Sesi selesai dicatat',
+      actor: String(row[5] || 'Santri')
+    };
+  });
+  add(testRows, 2, 1, -1, function (row) {
+    const ayat = Number(row[5]) && Number(row[6])
+      ? `ayat ${Number(row[5])}-${Number(row[6])}` : '';
+    return {
+      type: 'Tes',
+      title: 'Evaluasi hafalan',
+      detail: [String(row[4] || ''), ayat].filter(Boolean).join(' • '),
+      outcome: row[7] ? `Hasil ${String(row[7])}` : '',
+      actor: String(row[8] || 'Penguji')
+    };
+  });
+
+  if (!candidates.length) return null;
+  candidates.sort(function (a, b) { return b._sortTime - a._sortTime; });
+  const latest = candidates[0];
+  delete latest._sortTime;
+  return latest;
+}
+
+/** Ringkasan 7 hari Orang Tua; menghitung fakta histori tanpa mengubah sheet. */
+function buildWeeklySummary_(santriId, hafalanRows, murojaahRows, testRows) {
+  const endDate = appTodayStr();
+  const startDate = addDaysStr(-6);
+  const activeDates = Object.create(null);
+  const summary = {
+    startDate: startDate,
+    endDate: endDate,
+    activeDays: 0,
+    setoran: 0,
+    murojaah: 0,
+    evaluasi: 0,
+    hasilTes: { Lancar: 0, Tersendat: 0, Lupa: 0 },
+    totalAktivitas: 0
+  };
+  const wantedId = String(santriId || '');
+  if (!wantedId) return summary;
+
+  function count(rows, dateIndex, kind, resultIndex) {
+    const sourceRows = Array.isArray(rows) ? rows : [];
+    for (let i = 0; i < sourceRows.length; i++) {
+      const row = sourceRows[i];
+      if (String(row[2] || '') !== wantedId) continue;
+      const date = toDateStr(row[dateIndex]);
+      if (!date || date < startDate || date > endDate) continue;
+      summary[kind]++;
+      summary.totalAktivitas++;
+      activeDates[date] = true;
+      if (kind === 'evaluasi' && resultIndex >= 0) {
+        const result = String(row[resultIndex] || '');
+        if (Object.prototype.hasOwnProperty.call(summary.hasilTes, result)) summary.hasilTes[result]++;
+      }
+    }
+  }
+
+  count(hafalanRows, 1, 'setoran', -1);
+  count(murojaahRows, 1, 'murojaah', -1);
+  count(testRows, 1, 'evaluasi', 7);
+  summary.activeDays = Object.keys(activeDates).length;
+  return summary;
+}
+
 function ustazGetDashboard(session) {
   if (session.role !== 'ustaz') {
     return { success: false, code: 'E_FORBIDDEN', message: 'Akses khusus Ustaz' };
@@ -1749,6 +1895,8 @@ function ustazGetDashboard(session) {
   const masterIndex = buildMasterIndex_();
   const targetRows = readSheet_('Target', 6);
   const gamifRows = readSheet_('Gamifikasi', 6);
+  const hafalanRows = readSheet_('Hafalan', 10);
+  const lastSetoranBySantri = buildLatestSetoranIndex_(hafalanRows);
 
   const todayStr = appTodayStr();
   const currentMonthStr = todayStr.slice(0, 7);
@@ -1825,6 +1973,7 @@ function ustazGetDashboard(session) {
           surah: u.surah,
           ayatMulai: u.ayatMulai,
           ayatAkhir: u.ayatAkhir,
+          tglMulai: toDateStr(u.tglMulai),
           retentionStatus: u.retentionStatus
         };
       }
@@ -1889,6 +2038,7 @@ function ustazGetDashboard(session) {
       target: currentTarget,
       targetProgress: targetProgress,
       lastUnit: lastUnit,
+      lastSetoran: lastSetoranBySantri[idSantri] || null,
       flags: flags
     });
   }
@@ -2341,6 +2491,12 @@ function santriGetDashboard(session) {
     }
   }
 
+  // Ringkasan aktivitas faktual untuk menjawab "apa yang terakhir dilakukan?".
+  // Sumber setoran, murojaah, dan tes tetap histori terpisah di sheet masing-masing.
+  const hafalanRows = readSheet_('Hafalan', 10);
+  const testRows = readSheet_('Riwayat_Tes', 9);
+  const lastActivity = latestStudentActivity_(santriId, hafalanRows, murojaahRows, testRows);
+
   const result = {
     success: true,
     nama: session.nama,
@@ -2349,7 +2505,8 @@ function santriGetDashboard(session) {
     gamifikasi: gamifikasi,
     badges: badges,
     notifications: notifications.slice(-10).reverse(),
-    activityMap: activityMap
+    activityMap: activityMap,
+    lastActivity: lastActivity
   };
 
   dashCachePut_(cacheKey, result, SANTRI_CACHE_TTL_SEC);
@@ -2513,9 +2670,12 @@ function ortuGetDashboard(session) {
   let countKuning = 0;
   let countMerah = 0;
   const unitList = [];
+  let eligibleTestCount = 0;
 
   for (let i = 0; i < units.length; i++) {
     const status = units[i].retentionStatus || 'Hijau';
+    const testEligible = diffDaysFrom(units[i].tglMulai) >= 1;
+    if (testEligible) eligibleTestCount++;
     if (status === 'Hijau') countHijau++;
     else if (status === 'Kuning') countKuning++;
     else if (status === 'Merah') countMerah++;
@@ -2525,8 +2685,10 @@ function ortuGetDashboard(session) {
       surah: units[i].surah,
       ayatMulai: units[i].ayatMulai,
       ayatAkhir: units[i].ayatAkhir,
+      tglMulai: toDateStr(units[i].tglMulai),
       retentionStatus: status,
-      nextReview: units[i].nextReview
+      nextReview: units[i].nextReview,
+      testEligible: testEligible
     });
   }
 
@@ -2563,6 +2725,11 @@ function ortuGetDashboard(session) {
     }
   }
 
+  const hafalanRows = readSheet_('Hafalan', 10);
+  const murojaahRows = readSheet_('Murojaah', 7);
+  const lastActivity = latestStudentActivity_(santriId, hafalanRows, murojaahRows, tesRows);
+  const weeklySummary = buildWeeklySummary_(santriId, hafalanRows, murojaahRows, tesRows);
+
   const result = {
     success: true,
     ortuName: session.nama,
@@ -2584,6 +2751,9 @@ function ortuGetDashboard(session) {
       streak: streak
     },
     unitList: unitList,
+    eligibleTestCount: eligibleTestCount,
+    lastActivity: lastActivity,
+    weeklySummary: weeklySummary,
     recentTests: testHistory.slice(-100).reverse()
   };
 

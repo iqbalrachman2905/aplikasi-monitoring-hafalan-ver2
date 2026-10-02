@@ -45,6 +45,7 @@ const DashboardSantri = {
 
     // 3b. Papan progres ramah anak (berapa misi selesai hari ini)
     this.renderDailyProgress();
+    this.renderDashboardGuidance();
     this.renderKidFriendly();
 
     // 4. Badges & Heatmap
@@ -56,6 +57,111 @@ const DashboardSantri = {
 
     // 6. Siapkan data Flashcard
     this.initFlashcards();
+  },
+
+  /** Normalisasi daftar misi menjadi satu urutan aksi yang bisa dipakai UI. */
+  getMissionEntries() {
+    const missions = (this.data && this.data.missions) || {};
+    const toList = value => Array.isArray(value) ? value : (value ? [value] : []);
+    return [
+      ...toList(missions.sabaq).map(unit => ({ type: 'Sabaq', unit })),
+      ...toList(missions.sabqi).map(unit => ({ type: 'Sabqi', unit })),
+      ...toList(missions.manzil).map(unit => ({ type: 'Manzil', unit }))
+    ].filter(entry => entry.unit);
+  },
+
+  /** Ringkasan untuk menjawab aktivitas terakhir dan langkah Santri berikutnya. */
+  buildDashboardGuidance() {
+    const entries = this.getMissionEntries();
+    const pending = entries.find(entry => !entry.unit.completed) || null;
+    const activity = this.data && this.data.lastActivity;
+    let next;
+
+    if (pending) {
+      const unit = pending.unit;
+      next = {
+        kind: 'mission',
+        title: `Kerjakan misi ${pending.type}`,
+        detail: `${String(unit.surah || 'Hafalan')} • ayat ${Number(unit.ayatMulai) || 1}-${Number(unit.ayatAkhir) || Number(unit.ayatMulai) || 1}`,
+        button: `Mulai ${pending.type}`,
+        entry: pending
+      };
+    } else if (entries.length) {
+      next = {
+        kind: 'flashcard',
+        title: 'Semua misi hari ini selesai 🎉',
+        detail: 'Lanjutkan latihan ringan dengan flashcard tebak ayat.',
+        button: 'Buka flashcard',
+        entry: null
+      };
+    } else {
+      next = {
+        kind: 'flashcard',
+        title: 'Belum ada misi aktif',
+        detail: 'Hubungi Ustaz pembimbing untuk menyusun hafalan; sambil menunggu, kamu bisa berlatih flashcard.',
+        button: 'Buka flashcard',
+        entry: null
+      };
+    }
+
+    return {
+      activity: activity ? {
+        title: activity.title || 'Aktivitas tercatat',
+        detail: activity.detail || 'Rincian aktivitas tidak tersedia.',
+        meta: [activity.tgl, activity.actor, activity.outcome].filter(Boolean).join(' • ')
+      } : {
+        title: 'Belum ada aktivitas tercatat',
+        detail: 'Setoran, murojaah, dan evaluasi yang tersimpan akan muncul di sini.',
+        meta: 'Mulai dari satu misi harian di bawah.'
+      },
+      next
+    };
+  },
+
+  formatActivityDate(value) {
+    const raw = String(value || '');
+    const match = raw.match(/^(\d{4}-\d{2}-\d{2})/);
+    if (!match) return raw;
+    const date = new Date(`${match[1]}T12:00:00`);
+    if (isNaN(date.getTime())) return match[1];
+    return new Intl.DateTimeFormat('id-ID', { day: 'numeric', month: 'short', year: 'numeric' }).format(date);
+  },
+
+  renderDashboardGuidance() {
+    const guidance = this.buildDashboardGuidance();
+    const activity = guidance.activity;
+    const titleEl = document.getElementById('santri-last-activity-title');
+    const detailEl = document.getElementById('santri-last-activity-detail');
+    const metaEl = document.getElementById('santri-last-activity-meta');
+    const nextTitleEl = document.getElementById('santri-next-step-title');
+    const nextDetailEl = document.getElementById('santri-next-step-detail');
+    const button = document.getElementById('santri-next-step-button');
+
+    if (titleEl) titleEl.textContent = activity.title;
+    if (detailEl) detailEl.textContent = activity.detail;
+    if (metaEl) metaEl.textContent = activity.meta
+      ? activity.meta.split(' • ').map(part => this.formatActivityDate(part)).join(' • ')
+      : '';
+    if (nextTitleEl) nextTitleEl.textContent = guidance.next.title;
+    if (nextDetailEl) nextDetailEl.textContent = guidance.next.detail;
+    if (button) {
+      button.textContent = guidance.next.button;
+      button.onclick = () => this.startSuggestedMission();
+    }
+  },
+
+  startSuggestedMission() {
+    const guidance = this.buildDashboardGuidance();
+    if (guidance.next.kind === 'mission' && guidance.next.entry) {
+      const entry = guidance.next.entry;
+      const unit = entry.unit;
+      this.openMurojaahModal(
+        unit.idMaster || '', entry.type, unit.surah || '',
+        Number(unit.ayatMulai) || 1, Number(unit.ayatAkhir) || Number(unit.ayatMulai) || 1
+      );
+      return;
+    }
+    if (typeof App !== 'undefined' && App.switchSantriTab) App.switchSantriTab('flashcard');
   },
 
   renderGamification() {
@@ -89,18 +195,19 @@ const DashboardSantri = {
    * Memakai data yang sama dengan renderMissions agar tidak pernah berbeda.
    */
   renderDailyProgress() {
-    const m = (this.data && this.data.missions) || {};
-    const sabaq = Array.isArray(m.sabaq) ? m.sabaq : (m.sabaq ? [m.sabaq] : []);
-    const all = sabaq.concat(m.sabqi || [], m.manzil || []);
+    const all = this.getMissionEntries().map(entry => entry.unit);
     const total = all.length;
-    const done = all.filter(u => u && u.completed).length;
+    const done = all.filter(unit => unit && unit.completed).length;
     const pct = total > 0 ? Math.round((done / total) * 100) : 0;
 
     const textEl = document.getElementById('santri-daily-progress-text');
     if (textEl) textEl.textContent = total > 0 ? `${done} dari ${total} misi selesai` : 'Belum ada misi hari ini';
 
     const fillEl = document.getElementById('santri-daily-progress-fill');
-    if (fillEl) fillEl.style.width = `${pct}%`;
+    if (fillEl) {
+      fillEl.style.width = `${pct}%`;
+      fillEl.setAttribute('aria-valuenow', String(pct));
+    }
 
     const pctEl = document.getElementById('santri-daily-progress-pct');
     if (pctEl) pctEl.textContent = `${pct}%`;
